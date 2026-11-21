@@ -965,7 +965,7 @@ function bindProfiles(){
     finally{panel.inert=false}
   }
   async function post(data){
-    const res=await fetch(libraryUrl(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const res=await accountFetch(libraryUrl(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     if(!res.ok)throw Error('Could not save this change. Try again.');
     return (await res.json()).id;
   }
@@ -982,14 +982,25 @@ function bindProfiles(){
     if(del)del.onclick=()=>{if(confirm('Delete '+active.name+' and its watch history, downloads, and saved titles?'))change(()=>post({kind:'deleteProfile'}))};
   };
 }
-async function loadViewer(profile=sessionStorage.getItem('sc-active-profile')||'main'){
+function tabRead(key){try{return sessionStorage.getItem(key)}catch{return null}}
+function tabWrite(key,value){try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key)}catch{}}
+let tabSession=tabRead('sc-auth-session')||'';
+function accountFetch(path,options={}){
+  const headers=new Headers(options.headers);
+  if(tabSession)headers.set('X-SCinema-Session',tabSession);
+  return fetch(path,{...options,headers,credentials:'same-origin',cache:'no-store'});
+}
+async function loadViewer(profile=tabRead('sc-active-profile')||'main'){
   try{
-    const r=await fetch(libraryUrl(profile),{cache:'no-store'});
+    const r=await accountFetch(libraryUrl(profile),{cache:'no-store'});
     if(r.status===404&&profile!=='main')return loadViewer('main');
-    if(r.status===401){accountError=false;return}
+    if(r.status===401){
+      if(tabSession){tabSession='';tabWrite('sc-auth-session','');return loadViewer(profile)}
+      viewer=null;library.length=0;watched.length=0;history.length=0;accountError=false;return false
+    }
     if(!r.ok)throw Error();
     const data=await r.json();
-    sessionStorage.setItem('sc-active-profile',data.active.id);viewer=data;accountError=false;library.length=0;watched.length=0;history.length=0;
+    tabWrite('sc-active-profile',data.active.id);viewer=data;accountError=false;library.length=0;watched.length=0;history.length=0;
     for(const row of data.entries){
       if(!records.has(id(row.item)))remember(row.item);
       if(row.kind==='saved')library.push(records.get(id(row.item)));else if(row.kind==='watched')watched.push(row);else if(row.kind==='downloaded')history.push({...row.item,season:row.season,episode:row.episode,label:row.item.quality});
@@ -1018,7 +1029,7 @@ function trackProgress(video,x,season,episode){
   for(const event of ['pause','ended','seeked'])video.addEventListener(event,save);
 }
 async function writeEntry(kind,x,remove=false,season=0,episode=0,quality='',extra={},profile=viewer?.active.id){
-  const r=await fetch(libraryUrl(profile),{method:'POST',headers:{'Content-Type':'application/json'},keepalive:kind!=='saved',body:JSON.stringify({kind,item:{...titleSnapshot(x),quality,...extra},remove,season:Number(season),episode:Number(episode)})});
+  const r=await accountFetch(libraryUrl(profile),{method:'POST',headers:{'Content-Type':'application/json'},keepalive:kind!=='saved',body:JSON.stringify({kind,item:{...titleSnapshot(x),quality,...extra},remove,season:Number(season),episode:Number(episode)})});
   if(!r.ok)throw Error('Your library could not be updated. Please try again.');
 }
 function paintAccount(){
@@ -1041,7 +1052,7 @@ async function uploadPhoto(input){
     const side=Math.min(img.naturalWidth,img.naturalHeight);
     canvas.getContext('2d').drawImage(img,(img.naturalWidth-side)/2,(img.naturalHeight-side)/2,side,side,0,0,160,160);
     const photo=canvas.toDataURL('image/jpeg',0.82);
-    const r=await fetch(libraryUrl(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'photo',photo})});
+    const r=await accountFetch(libraryUrl(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'photo',photo})});
     if(!r.ok)throw Error();
     viewer.photo=photo;paintAccount();status.textContent='Photo saved.';
   }catch{status.textContent='Could not save this photo. Try a JPG, PNG or WebP image.'}
@@ -1059,16 +1070,18 @@ document.addEventListener('change',event=>{
   if(event.target.id==='watch-order'){localStorage.setItem('sc-list-order',JSON.stringify(event.target.value));accountPage('watchlist');document.querySelector('#watch-order')?.focus()}
 });
 function signInPanel(page){
-  app.innerHTML='<section class="account-page"><div class="account-heading"><h1>Your SCinema account</h1><p>Keep your profiles, watch history and saved titles together.</p></div><div class="access-panel"><div class="account-tabs"><button type="button" data-mode="login">Sign in</button><button type="button" data-mode="register">Create account</button></div><a class="btn google-auth" data-google hidden target="_top" href="/api/auth/google">Continue with Google</a><form data-auth><label data-name>Your name<input name="name" autocomplete="name" maxlength="80"></label><label>Email<input type="email" name="email" autocomplete="email" required maxlength="254"></label><label>Password<input name="password" type="password" required maxlength="256"></label><button class="btn primary" type="submit"></button><p role="status"></p></form></div></section>';
+  app.innerHTML='<section class="account-page"><div class="account-heading"><h1>Your SCinema account</h1><p>Keep your profiles, watch history and saved titles together.</p></div><div class="access-panel"><div class="account-tabs"><button type="button" data-mode="login">Sign in</button><button type="button" data-mode="find">Find your account</button><button type="button" data-mode="register">Create account</button></div><a class="btn google-auth" data-google hidden target="_top" href="/api/auth/google">Continue with Google</a><form data-auth><label data-name>Your name<input name="name" autocomplete="name" maxlength="80"></label><label>Email<input type="email" name="email" autocomplete="username" required maxlength="254"></label><label>Password<input name="password" type="password" required maxlength="256"></label><button class="btn primary" type="submit"></button><p role="status"></p></form></div></section>';
   const form=app.querySelector('[data-auth]'),notice=form.querySelector('[role=status]'),google=app.querySelector('[data-google]');
   fetch('/api/auth/options').then(r=>r.json()).then(data=>{google.hidden=!data.google}).catch(()=>{});
   let mode;
   function choose(next){
-    mode=next;const create=mode==='register';
+    mode=next;const create=mode==='register',find=mode==='find';
+    form.elements.password.closest('label').hidden=find;form.elements.password.disabled=find;
+    form.querySelector('[data-name] input').disabled=!create;
     form.querySelector('[data-name]').hidden=!create;form.elements.name.required=create;
     form.elements.password.autocomplete=create?'new-password':'current-password';form.elements.password.minLength=create?12:1;
     form.elements.password.placeholder=create?'At least 12 characters':'';
-    form.querySelector('button').textContent=create?'Create account':'Sign in';
+    form.querySelector('button').textContent=create?'Create account':find?'Find your account':'Sign in';
     for(const b of app.querySelectorAll('[data-mode]'))b.setAttribute('aria-pressed',String(mode===b.dataset.mode));
     notice.textContent='';
   }
@@ -1079,14 +1092,38 @@ function signInPanel(page){
   form.onsubmit=async e=>{
     e.preventDefault();const submit=form.querySelector('button');submit.disabled=true;notice.textContent='Signing in…';
     try{
-      const r=await fetch('/api/auth/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(form)))});
+      const headers={'Content-Type':'application/json'};
+      if(mode!=='find')headers['X-SCinema-Client']='tab';
+      const r=await accountFetch('/api/auth/'+mode,{method:'POST',headers,body:JSON.stringify(Object.fromEntries(new FormData(form)))});
       const result=await r.json();if(!r.ok)throw Error(result.error||'Sign-in failed.');
-      if(!await loadViewer('main'))throw Error('Could not open your profile. Try again.');
+      if(mode==='find'&&result.emailLink){notice.textContent='If this email belongs to an account, look for a sign-in link in your inbox.';return}
+      if(mode==='find'&&!result.canContinue){
+        choose('login');notice.textContent='Enter your password to continue with this email.';form.elements.password.focus();return;
+      }
+      if(result.tabSession){tabSession=result.tabSession;tabWrite('sc-auth-session',tabSession)}
+      if(!await loadViewer('main')){
+        if(accountError){accountPage(page);return}
+        throw Error('Your browser could not keep this session. Open SCinema in its own tab and sign in.');
+      }
       paintAccount();accountPage(page);
     }catch(error){notice.textContent=error.message}finally{submit.disabled=false}
   };
 }
 
+function openEmailSignIn(token){
+  app.innerHTML='<section class="account-page"><h1>Sign in to SCinema</h1><div class="access-panel"><button type="button" class="btn primary">Continue to my profile</button><p role="status"></p><a href="#profile">Back to sign in</a></div></section>';
+  const button=app.querySelector('button'),status=app.querySelector('[role=status]');
+  button.onclick=async()=>{
+    button.disabled=true;
+    try{
+      const r=await accountFetch('/api/auth/redeem',{method:'POST',headers:{'Content-Type':'application/json','X-SCinema-Client':'tab'},body:JSON.stringify({token})});
+      const result=await r.json();if(!r.ok)throw Error(result.error||'Could not open this link.');
+      tabSession=result.tabSession||'';tabWrite('sc-auth-session',tabSession);
+      if(!await loadViewer('main'))throw Error('Your profile could not be loaded.');
+      paintAccount();location.replace(location.pathname+'#profile');
+    }catch(error){status.textContent=error.message;button.disabled=false}
+  };
+}
 function accountPage(page){
   const shell='<section class="page account-page"><h1>'+(page==='profile'?'My profile':'My library')+'</h1>';
   if(accountError){app.innerHTML=shell+'<p>Could not load your account.</p><button class="btn" data-library-retry>Try again</button></section>';return}
@@ -1099,15 +1136,15 @@ function accountPage(page){
   app.querySelector('.account-logout').onclick=async e=>{
     const button=e.currentTarget;button.disabled=true;
     try{
-      const result=await fetch('/api/auth/logout',{method:'POST'});if(!result.ok)throw Error();
-      sessionStorage.removeItem('sc-active-profile');location.replace(location.pathname+'?signedout=1#profile');
+      const result=await accountFetch('/api/auth/logout',{method:'POST'});if(!result.ok)throw Error();
+      tabWrite('sc-active-profile','');tabSession='';tabWrite('sc-auth-session','');location.replace(location.pathname+'?signedout=1#profile');
     }catch{button.disabled=false;button.textContent='Retry logout'}
   };
   bindProfiles();
   const photo=app.querySelector('[data-photo]');if(photo)photo.onchange=()=>uploadPhoto(photo);
 }
 
-function route(){dismissPreview();leaveFixtures();clearTimeout(spotlightTimer);let [page='home',arg,tab='overview']=location.hash.slice(1).split('/');page=page||'home';if(!['movies','series','trending','anime','cartoons',...Object.keys(collectionNames)].includes(page))currentFeatureField='';let rev=++epoch;nav.innerHTML=[['home','Discover'],['search','Search'],['series','TV Series'],['sports','Sports'],['watchlist','Watchlist']].map(([k,t])=>'<a class="'+(k===page?'on':'')+'" href="#'+k+'">'+icon(k)+'<span>'+t+'</span></a>').join('');if(page==='home')landing();else if(page==='anime')collectionPage(page,arg);else if(page==='cartoons')app.innerHTML='<section class="page"><h1>Cartoons</h1>'+categoryFeature(page,cartoons())+grid(cartoons())+'</section>';else if(page==='sports')fixturesPage(app,arg);else if(Object.hasOwn(collectionNames,page))collectionPage(page,arg);else if(['africa','asia','nollywood','bollywood'].includes(page))location.replace(({africa:'#made-in-africa',asia:'#made-in-asia',nollywood:'#made-in-africa/country=Nigeria',bollywood:'#made-in-asia/country=India&industry=Bollywood+%C2%B7+Hindi+cinema'})[page]);else if(page==='search'){runSearch();searchPage()}else if(page==='title'&&records.has(arg)){let x=records.get(arg);detail(x,tab,rev)}else if(['profile','watchlist','watched','downloads'].includes(page)){accountPage(page)}else if(page==='movies'){app.innerHTML='<section class="page" id="movie-browse"><h1>Movies</h1>'+categoryFeature(page+'|'+genre,catalogByType(1).filter(match))+chips()+'<div class="movie-grid">'+grid(browseSelection().map(key=>records.get(key)))+'</div><div class="movie-controls">'+movieControls()+'</div></section>'}else if(['series','trending'].includes(page)){app.innerHTML='<div class="page"><h1>'+({movies:'Movies',series:'TV series',trending:'Trending now'})[page]+'</h1>'+categoryFeature(page+'|'+genre,(page==='trending'?trendingMovies():catalogByType(2)).filter(match))+chips()+grid((page==='trending'?trendingMovies():catalogByType(page==='movies'?1:2)).filter(match))+'</div>'}else app.innerHTML='<div class="page"><h1>Title unavailable</h1><a href="#search">Search the catalog</a></div>'}
+function route(){dismissPreview();leaveFixtures();clearTimeout(spotlightTimer);let [page='home',arg,tab='overview']=location.hash.slice(1).split('/');page=page||'home';if(!['movies','series','trending','anime','cartoons',...Object.keys(collectionNames)].includes(page))currentFeatureField='';let rev=++epoch;nav.innerHTML=[['home','Discover'],['search','Search'],['series','TV Series'],['sports','Sports'],['watchlist','Watchlist']].map(([k,t])=>'<a class="'+(k===page?'on':'')+'" href="#'+k+'">'+icon(k)+'<span>'+t+'</span></a>').join('');if(page==='email-signin')openEmailSignIn(arg);else if(page==='home')landing();else if(page==='anime')collectionPage(page,arg);else if(page==='cartoons')app.innerHTML='<section class="page"><h1>Cartoons</h1>'+categoryFeature(page,cartoons())+grid(cartoons())+'</section>';else if(page==='sports')fixturesPage(app,arg);else if(Object.hasOwn(collectionNames,page))collectionPage(page,arg);else if(['africa','asia','nollywood','bollywood'].includes(page))location.replace(({africa:'#made-in-africa',asia:'#made-in-asia',nollywood:'#made-in-africa/country=Nigeria',bollywood:'#made-in-asia/country=India&industry=Bollywood+%C2%B7+Hindi+cinema'})[page]);else if(page==='search'){runSearch();searchPage()}else if(page==='title'&&records.has(arg)){let x=records.get(arg);detail(x,tab,rev)}else if(['profile','watchlist','watched','downloads'].includes(page)){accountPage(page)}else if(page==='movies'){app.innerHTML='<section class="page" id="movie-browse"><h1>Movies</h1>'+categoryFeature(page+'|'+genre,catalogByType(1).filter(match))+chips()+'<div class="movie-grid">'+grid(browseSelection().map(key=>records.get(key)))+'</div><div class="movie-controls">'+movieControls()+'</div></section>'}else if(['series','trending'].includes(page)){app.innerHTML='<div class="page"><h1>'+({movies:'Movies',series:'TV series',trending:'Trending now'})[page]+'</h1>'+categoryFeature(page+'|'+genre,(page==='trending'?trendingMovies():catalogByType(2)).filter(match))+chips()+grid((page==='trending'?trendingMovies():catalogByType(page==='movies'?1:2)).filter(match))+'</div>'}else app.innerHTML='<div class="page"><h1>Title unavailable</h1><a href="#search">Search the catalog</a></div>'}
 app.onclick=async e=>{let b=e.target.closest('button');if(!b)return;if(b.dataset.scroll){const rail=b.closest('.shelf').querySelector('.grid');rail?.scrollBy({left:Number(b.dataset.scroll)*rail.clientWidth*.9,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});return}if(b.dataset.feature!==undefined){showFeature(Number(b.dataset.feature))}if(b.hasAttribute('data-rotation')){spotlightPaused=!spotlightPaused;b.setAttribute('aria-label',spotlightPaused?'Resume spotlight':'Pause spotlight');b.textContent=spotlightPaused?'▶':'Ⅱ';scheduleSpotlight()}if(b.dataset.genre){genre=b.dataset.genre;route()}if(b.hasAttribute('data-library-retry')){await loadViewer();route();return}
 if(b.hasAttribute('data-import-saved')){
   b.disabled=true;
