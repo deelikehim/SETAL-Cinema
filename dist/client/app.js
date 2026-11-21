@@ -193,7 +193,7 @@ function collectionPage(key,params=''){
   function href(c,i,g){const q=new URLSearchParams();if(c)q.set('country',c);if(i)q.set('industry',i);if(g!=='All')q.set('genre',g);return '#'+key+(q.size?'/'+q:'')}
   const chips=genres.map(g=>'<a class="chip '+(g===selectedGenre?'active':'')+'" '+(g===selectedGenre?'aria-current="true"':'')+' href="'+esc(href(country,industry,g))+'">'+g+'</a>').join('');
   const industryOptions=()=>opts([...new Set(collectionTitles(key).filter(x=>!country||productionCountry(x)===country).map(industryOf))].sort(),industry);
-  app.innerHTML='<section class="page"><h1>'+ (collectionNames[key]||'Anime')+'</h1><div class="filters">'+chips+'</div>'+(countries?'<div class="sport-filters"><label>Country or market<select id="market"><option value="">All countries and markets</option>'+opts(countries,country)+'</select></label><label>Film industry<select id="industry"><option value="">All industries</option>'+industryOptions()+'</select></label></div>':'')+'<div id="market-grid"></div><button class="btn collection-more">LOAD MORE</button><p class="hint" role="status"></p></section>';
+  app.innerHTML='<section class="page"><h1>'+ (collectionNames[key]||'Anime')+'</h1><div data-category-feature>'+categoryFeature(key+'|'+params,films())+'</div><div class="filters">'+chips+'</div>'+(countries?'<div class="sport-filters"><label>Country or market<select id="market"><option value="">All countries and markets</option>'+opts(countries,country)+'</select></label><label>Film industry<select id="industry"><option value="">All industries</option>'+industryOptions()+'</select></label></div>':'')+'<div id="market-grid"></div><button class="btn collection-more">LOAD MORE</button><p class="hint" role="status"></p></section>';
   if(countries){
     app.querySelector('#market').onchange=e=>location.hash=href(e.target.value,'',selectedGenre);
     app.querySelector('#industry').onchange=e=>location.hash=href(country,e.target.value,selectedGenre);
@@ -228,6 +228,8 @@ function collectionPage(key,params=''){
       }));
       if(epoch!==rev)return;
       count+=append(10-count);
+      const slot=app.querySelector('[data-category-feature]');
+      if(!slot.firstElementChild)slot.innerHTML=categoryFeature(key+'|'+params,films());
     }
     if(countries)app.querySelector('#industry').innerHTML='<option value="">All industries</option>'+industryOptions();
     button.disabled=false;button.hidden=!feeds.length&&!films().some(x=>!shown.has(id(x)));
@@ -379,9 +381,56 @@ function picksRail(exclude){
   const picks=dailyPicks().filter(x=>!exclude||id(x)!==id(exclude));
   return homeRail('Today’s Picks for You',picks.map(x=>card({...x,poster:x.back||safe(x.stills?.url)||pic(x)})));
 }
+const categoryFeatures=new Map();
+let currentFeatureField='';
+function titleIdentity(x){
+  return x.title.trim().toLowerCase()+'|'+year(x)+'|'+Number(x.subjectType);
+}
+function categoryFeature(field,eligible){
+  const choices=[...new Map(eligible.filter(x=>x?.title&&!adultMovie(x)).map(x=>[titleIdentity(x),x])).values()];
+  if(!choices.length){currentFeatureField=field;return ''}
+  const last=categoryFeatures.get(field);
+  let selected=currentFeatureField===field&&choices.find(x=>titleIdentity(x)===last);
+  if(!selected){
+    const alternatives=choices.filter(x=>titleIdentity(x)!==last);
+    const pool=alternatives.length?alternatives:choices;
+    selected=pool[Math.floor(Math.random()*pool.length)];
+  }
+  categoryFeatures.set(field,titleIdentity(selected));currentFeatureField=field;
+  const art=selected.back||safe(selected.stills?.url)||safe(selected.trailer?.cover?.url)||pic(selected);
+  return '<article class="category-feature">'+(art?'<img src="'+esc(art)+'" alt="" fetchpriority="high">':'')+'<div><p>'+esc([kind(selected),year(selected),tags(selected).slice(0,2).join(' · ')].filter(Boolean).join(' · '))+'</p><h2><a href="'+detailLink(selected)+'">'+esc(selected.title)+'</a></h2><div class="actions"><a class="btn primary" href="'+detailLink(selected,'watch')+'">'+icon('play')+' Play</a><a class="btn" href="'+detailLink(selected)+'">View details</a></div></div></article>';
+}
+function relatedTitles(source){
+  const cleanTags=x=>new Set(tags(x).map(t=>t.trim().toLowerCase()).filter(Boolean));
+  const medium=(x,g)=>g.has('anime')||(g.has('animation')&&productionCountry(x)==='Japan')?'anime':[...g].some(t=>/^(animation|animated|cartoons?|donghua)$/.test(t))?'animation':'live';
+  const original=cleanTags(source),format=medium(source,original),sourceKey=titleIdentity(source);
+  const counts=new Map(),candidates=new Map();
+  for(const item of catalogByType(Number(source.subjectType))){
+    const identity=titleIdentity(item);
+    if(identity===sourceKey||id(item)===id(source)||adultMovie(item)||candidates.has(identity))continue;
+    const genres=cleanTags(item);
+    if(medium(item,genres)!==format)continue;
+    candidates.set(identity,{item,genres});
+    for(const g of genres)counts.set(g,(counts.get(g)||0)+1);
+  }
+  const weight=g=>1+Math.log((1+candidates.size)/(1+(counts.get(g)||0)));
+  const ranked=[];
+  for(const {item,genres} of candidates.values()){
+    const shared=[...original].filter(g=>genres.has(g));
+    if(!shared.length)continue;
+    const total=[...new Set([...original,...genres])].reduce((n,g)=>n+weight(g),0);
+    const overlap=shared.reduce((n,g)=>n+weight(g),0);
+    const country=productionCountry(source);
+    const local=country&&country===productionCountry(item)?1:0;
+    const distance=Math.abs(Number(year(source))-Number(year(item)));
+    const score=3*overlap/total+0.45*overlap+0.65*local+0.15/(1+distance);
+    ranked.push({item,score});
+  }
+  return ranked.sort((a,b)=>b.score-a.score||Number(b.item.imdbRatingValue||0)-Number(a.item.imdbRatingValue||0)).slice(0,10).map(row=>row.item);
+}
 function titleRails(x){
-  const related=catalogByType(x.subjectType).filter(y=>id(y)!==id(x)&&tags(y).some(tag=>tags(x).includes(tag))).slice(0,6);
-  return '<div class="title-rails">'+picksRail(x)+'<div data-title-resume>'+resumeRail()+'</div>'+shelf('More like this',related,'')+'</div>';
+  const related=relatedTitles(x);
+  return '<div class="title-rails">'+picksRail(x)+'<div data-title-resume>'+resumeRail()+'</div>'+(related.length?shelf('More like this',related,''):'')+'</div>';
 }
 function resumeRail(){
   const seen=new Set(),tiles=[];
@@ -962,7 +1011,7 @@ function accountPage(page){
   const photo=app.querySelector('[data-photo]');if(photo)photo.onchange=()=>uploadPhoto(photo);
 }
 
-function route(){dismissPreview();leaveFixtures();clearTimeout(spotlightTimer);let [page='home',arg,tab='overview']=location.hash.slice(1).split('/');page=page||'home';let rev=++epoch;nav.innerHTML=[['home','Discover'],['search','Search'],['series','TV Series'],['sports','Sports'],['watchlist','Watchlist']].map(([k,t])=>'<a class="'+(k===page?'on':'')+'" href="#'+k+'">'+icon(k)+'<span>'+t+'</span></a>').join('');if(page==='home')landing();else if(page==='anime')collectionPage(page,arg);else if(page==='cartoons')app.innerHTML='<section class="page"><h1>Cartoons</h1>'+grid(cartoons())+'</section>';else if(page==='sports')fixturesPage(app,arg);else if(Object.hasOwn(collectionNames,page))collectionPage(page,arg);else if(['africa','asia','nollywood','bollywood'].includes(page))location.replace(({africa:'#made-in-africa',asia:'#made-in-asia',nollywood:'#made-in-africa/country=Nigeria',bollywood:'#made-in-asia/country=India&industry=Bollywood+%C2%B7+Hindi+cinema'})[page]);else if(page==='search'){runSearch();searchPage()}else if(page==='title'&&records.has(arg)){let x=records.get(arg);detail(x,tab,rev)}else if(['profile','watchlist','watched','downloads'].includes(page)){accountPage(page)}else if(page==='movies'){app.innerHTML='<section class="page" id="movie-browse"><h1>Movies</h1>'+chips()+'<div class="movie-grid">'+grid(browseSelection().map(key=>records.get(key)))+'</div><div class="movie-controls">'+movieControls()+'</div></section>'}else if(['series','trending'].includes(page)){app.innerHTML='<div class="page"><h1>'+({movies:'Movies',series:'TV series',trending:'Trending now'})[page]+'</h1>'+chips()+grid((page==='trending'?trendingMovies():catalogByType(page==='movies'?1:2)).filter(match))+'</div>'}else app.innerHTML='<div class="page"><h1>Title unavailable</h1><a href="#search">Search the catalog</a></div>'}
+function route(){dismissPreview();leaveFixtures();clearTimeout(spotlightTimer);let [page='home',arg,tab='overview']=location.hash.slice(1).split('/');page=page||'home';if(!['movies','series','trending','anime','cartoons',...Object.keys(collectionNames)].includes(page))currentFeatureField='';let rev=++epoch;nav.innerHTML=[['home','Discover'],['search','Search'],['series','TV Series'],['sports','Sports'],['watchlist','Watchlist']].map(([k,t])=>'<a class="'+(k===page?'on':'')+'" href="#'+k+'">'+icon(k)+'<span>'+t+'</span></a>').join('');if(page==='home')landing();else if(page==='anime')collectionPage(page,arg);else if(page==='cartoons')app.innerHTML='<section class="page"><h1>Cartoons</h1>'+categoryFeature(page,cartoons())+grid(cartoons())+'</section>';else if(page==='sports')fixturesPage(app,arg);else if(Object.hasOwn(collectionNames,page))collectionPage(page,arg);else if(['africa','asia','nollywood','bollywood'].includes(page))location.replace(({africa:'#made-in-africa',asia:'#made-in-asia',nollywood:'#made-in-africa/country=Nigeria',bollywood:'#made-in-asia/country=India&industry=Bollywood+%C2%B7+Hindi+cinema'})[page]);else if(page==='search'){runSearch();searchPage()}else if(page==='title'&&records.has(arg)){let x=records.get(arg);detail(x,tab,rev)}else if(['profile','watchlist','watched','downloads'].includes(page)){accountPage(page)}else if(page==='movies'){app.innerHTML='<section class="page" id="movie-browse"><h1>Movies</h1>'+categoryFeature(page+'|'+genre,catalogByType(1).filter(match))+chips()+'<div class="movie-grid">'+grid(browseSelection().map(key=>records.get(key)))+'</div><div class="movie-controls">'+movieControls()+'</div></section>'}else if(['series','trending'].includes(page)){app.innerHTML='<div class="page"><h1>'+({movies:'Movies',series:'TV series',trending:'Trending now'})[page]+'</h1>'+categoryFeature(page+'|'+genre,(page==='trending'?trendingMovies():catalogByType(2)).filter(match))+chips()+grid((page==='trending'?trendingMovies():catalogByType(page==='movies'?1:2)).filter(match))+'</div>'}else app.innerHTML='<div class="page"><h1>Title unavailable</h1><a href="#search">Search the catalog</a></div>'}
 app.onclick=async e=>{let b=e.target.closest('button');if(!b)return;if(b.dataset.scroll){const rail=b.closest('.shelf').querySelector('.grid');rail?.scrollBy({left:Number(b.dataset.scroll)*rail.clientWidth*.9,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});return}if(b.dataset.feature!==undefined){showFeature(Number(b.dataset.feature))}if(b.hasAttribute('data-rotation')){spotlightPaused=!spotlightPaused;b.setAttribute('aria-label',spotlightPaused?'Resume spotlight':'Pause spotlight');b.textContent=spotlightPaused?'▶':'Ⅱ';scheduleSpotlight()}if(b.dataset.genre){genre=b.dataset.genre;route()}if(b.hasAttribute('data-library-retry')){await loadViewer();route();return}
 if(b.hasAttribute('data-import-saved')){
   b.disabled=true;
