@@ -177,10 +177,110 @@ async function cinebase(url,request,env){
   }catch{return fileError('CineBase is temporarily unavailable.',502)}
 }
 
+const sessionCookie='__Host-sc-session';
+const hex=bytes=>Array.from(new Uint8Array(bytes),x=>x.toString(16).padStart(2,'0')).join('');
+const randomToken=()=>hex(crypto.getRandomValues(new Uint8Array(32)));
+const digest=async text=>hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
+function cookieValue(request,key){return (request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith(key+'='))?.slice(key.length+1)||''}
+function cookie(key,value,age){return key+'='+value+'; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age='+age}
+let authSchema;
+async function initAuth(db){
+  if(!authSchema)authSchema=db.batch([
+    'CREATE TABLE IF NOT EXISTS sc_login_accounts (id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL,method TEXT NOT NULL,login TEXT NOT NULL,salt TEXT,hash TEXT,UNIQUE(method,login))',
+    'CREATE TABLE IF NOT EXISTS sc_login_sessions (token TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS sc_legacy_claims (token TEXT PRIMARY KEY,owner TEXT NOT NULL,email TEXT NOT NULL,expires INTEGER NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS sc_owner_links (account TEXT PRIMARY KEY,owner TEXT UNIQUE NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS sc_login_attempts (bucket TEXT PRIMARY KEY,n INTEGER NOT NULL,expires INTEGER NOT NULL)'
+  ].map(sql=>db.prepare(sql))).catch(e=>{authSchema=null;throw e});
+  await authSchema;
+}
+async function sessionIdentity(request,env){
+  const token=cookieValue(request,sessionCookie);
+  if(!/^[a-f0-9]{64}$/.test(token))return null;
+  await initAuth(env.DB);
+  return env.DB.prepare('SELECT COALESCE(l.owner,a.id) AS id,a.email,a.name FROM sc_login_sessions s JOIN sc_login_accounts a ON a.id=s.owner LEFT JOIN sc_owner_links l ON l.account=a.id WHERE s.token=? AND s.expires>?').bind(await digest(token),Date.now()).first();
+}
+async function passwordHash(password,salt){
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);
+  return hex(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',iterations:100000,salt:new TextEncoder().encode(salt)},key,256));
+}
+function authJson(data,status=200){return Response.json(data,{status,headers:{'Cache-Control':'no-store'}})}
+async function issueSession(request,db,account){
+  const token=randomToken(),now=Date.now(),age=30*86400;
+  await db.batch([db.prepare('DELETE FROM sc_login_sessions WHERE expires<=? OR token=?').bind(now,await digest(cookieValue(request,sessionCookie))),db.prepare('INSERT INTO sc_login_sessions VALUES(?,?,?)').bind(await digest(token),account.id,now+age*1000)]);
+  const proof=cookieValue(request,'__Host-sc-claim');
+  if(proof){
+    const key=await digest(proof);
+    await db.batch([db.prepare('INSERT OR IGNORE INTO sc_owner_links(account,owner) SELECT a.id,c.owner FROM sc_login_accounts a JOIN sc_legacy_claims c ON lower(a.email)=lower(c.email) WHERE a.id=? AND c.token=? AND c.expires>?').bind(account.id,key,now),db.prepare('DELETE FROM sc_legacy_claims WHERE token=? OR expires<=?').bind(key,now)]);
+  }
+  const res=authJson({ok:true});res.headers.append('Set-Cookie',cookie(sessionCookie,token,age));return res;
+}
+async function authRoute(request,env,path){
+  const url=new URL(request.url),db=env.DB;
+  try{
+    if(path==='options'&&request.method==='GET')return authJson({google:!!(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET)});
+    await initAuth(db);
+    if(path==='google'&&request.method==='GET'){
+      if(!env.GOOGLE_CLIENT_ID||!env.GOOGLE_CLIENT_SECRET)return new Response('Google sign-in is awaiting setup. Return to SCinema to sign in with email.',{status:503});
+      const state=randomToken(),target=new URL('https://accounts.google.com/o/oauth2/v2/auth');
+      target.search=new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID,response_type:'code',scope:'openid email profile',redirect_uri:url.origin+'/api/auth/google/callback',state,prompt:'select_account'}).toString();
+      return new Response(null,{status:302,headers:{Location:target.href,'Cache-Control':'no-store','Set-Cookie':cookie('__Host-sc-oauth',state,600)}});
+    }
+    if(path==='google/callback'&&request.method==='GET'){
+      const state=cookieValue(request,'__Host-sc-oauth'),back=(ok)=>new Response(null,{status:303,headers:{Location:url.origin+(ok?'/#profile':'/?signin=failed#profile'),'Cache-Control':'no-store','Set-Cookie':cookie('__Host-sc-oauth','',0)}});
+      if(!state||state!==url.searchParams.get('state')||!url.searchParams.get('code'))return back(false);
+      const exchange=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID,client_secret:env.GOOGLE_CLIENT_SECRET,grant_type:'authorization_code',code:url.searchParams.get('code'),redirect_uri:url.origin+'/api/auth/google/callback'})});
+      if(!exchange.ok)return back(false);
+      const token=await exchange.json(),info=await fetch('https://openidconnect.googleapis.com/v1/userinfo',{headers:{Authorization:'Bearer '+token.access_token}});
+      if(!info.ok)return back(false);
+      const user=await info.json();
+      if(!user.sub||!user.email||user.email_verified!==true)return back(false);
+      await db.prepare("INSERT INTO sc_login_accounts(id,name,email,method,login) VALUES(?,?,?,'google',?) ON CONFLICT(method,login) DO UPDATE SET name=excluded.name,email=excluded.email").bind(crypto.randomUUID(),String(user.name||user.email).slice(0,80),user.email,user.sub).run();
+      const account=await db.prepare("SELECT id FROM sc_login_accounts WHERE method='google' AND login=?").bind(user.sub).first();
+      const session=await issueSession(request,db,account),res=back(true);res.headers.append('Set-Cookie',session.headers.get('Set-Cookie'));return res;
+    }
+    if(request.method!=='POST'||request.headers.get('Origin')!==url.origin)return authJson({},403);
+    if(path==='logout'){
+      await db.prepare('DELETE FROM sc_login_sessions WHERE token=?').bind(await digest(cookieValue(request,sessionCookie))).run();
+      const res=authJson({ok:true});res.headers.append('Set-Cookie',cookie(sessionCookie,'',0));return res;
+    }
+    if(!['register','login'].includes(path))return authJson({},404);
+    const now=Date.now(),bucket=await digest((request.headers.get('CF-Connecting-IP')||'shared')+'|'+Math.floor(now/600000));
+    const attempts=await db.prepare('INSERT INTO sc_login_attempts VALUES(?,1,?) ON CONFLICT(bucket) DO UPDATE SET n=n+1 RETURNING n').bind(bucket,now+600000).first();
+    if(attempts.n===1)await db.prepare('DELETE FROM sc_login_attempts WHERE expires<?').bind(now).run();
+    if(attempts.n>40)return authJson({error:'Too many attempts. Try again in ten minutes.'},429);
+    const raw=await request.text();if(raw.length>2000)return authJson({},413);
+    let body;try{body=JSON.parse(raw)}catch{return authJson({},400)}
+    const email=String(body.email||'').trim().toLowerCase(),name=String(body.name||'').trim(),password=body.password;
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254||typeof password!=='string'||!password.length||password.length>256)return authJson({error:'Enter a valid email and password.'},400);
+    if(path==='register'){
+      if(!name||name.length>80||password.length<12)return authJson({error:'Enter a name and a password of at least 12 characters.'},400);
+      const salt=randomToken(),id=crypto.randomUUID(),hash=await passwordHash(password,salt);
+      const result=await db.prepare("INSERT INTO sc_login_accounts VALUES(?,?,?,'password',?,?,?) ON CONFLICT(method,login) DO NOTHING").bind(id,name,email,email,salt,hash).run();
+      if(!result.meta.changes)return authJson({error:'Could not create this account. Try signing in.'},409);
+      return issueSession(request,db,{id});
+    }
+    const account=await db.prepare("SELECT * FROM sc_login_accounts WHERE method='password' AND login=?").bind(email).first();
+    const hash=await passwordHash(password,account?.salt||'missing-account');
+    if(!account||hash!==account.hash)return authJson({error:'Email or password is incorrect.'},401);
+    return issueSession(request,db,account);
+  }catch{return authJson({error:'Sign-in is temporarily unavailable. Please try again.'},503)}
+}
+
 async function viewerLibrary(request,env){
-  const account=request.headers.get('oai-authenticated-user-id');
+  const identity=await sessionIdentity(request,env);
+  const account=identity?.id;
   const reply=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'private, no-store'}});
-  if(!account)return reply({signedIn:false},401);
+  if(!account){
+    const res=reply({signedIn:false},401);
+    const old=request.headers.get('oai-authenticated-user-id'),email=request.headers.get('oai-authenticated-user-email');
+    if(request.method==='GET'&&old&&email&&!cookieValue(request,'__Host-sc-claim')){
+      await initAuth(env.DB);const proof=randomToken();
+      await env.DB.prepare('INSERT INTO sc_legacy_claims VALUES(?,?,?,?)').bind(await digest(proof),old,email,Date.now()+600000).run();
+      res.headers.append('Set-Cookie',cookie('__Host-sc-claim',proof,600));
+    }
+    return res;
+  }
   try{
     const profileId=new URL(request.url).searchParams.get('profile')||'main';
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS cinema_profiles(account TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, avatar TEXT NOT NULL, PRIMARY KEY(account,id))').run();
@@ -192,7 +292,7 @@ async function viewerLibrary(request,env){
       const {results}=await env.DB.prepare('SELECT kind,item,season,episode FROM viewer_library WHERE owner=? ORDER BY updated_at DESC').bind(owner).all();
       const profile=await env.DB.prepare('SELECT photo FROM viewer_profile WHERE owner=?').bind(owner).first();
       const profiles=await env.DB.prepare("SELECT id,name,avatar FROM cinema_profiles WHERE account=? ORDER BY (id='main') DESC,rowid").bind(account).all();
-      return reply({signedIn:true,active,profiles:profiles.results,photo:profile?.photo||null,email:request.headers.get('oai-authenticated-user-email'),entries:results.map(row=>({...row,item:JSON.parse(row.item)}))});
+      return reply({signedIn:true,active,profiles:profiles.results,photo:profile?.photo||null,email:identity.email,name:identity.name,entries:results.map(row=>({...row,item:JSON.parse(row.item)}))});
     }
     if(request.method!=='POST')return reply({},405);
     if(request.headers.get('Origin')!==new URL(request.url).origin)return reply({},403);
@@ -244,6 +344,7 @@ async function viewerLibrary(request,env){
 export default {
   async fetch(request,env){
     const url=new URL(request.url);
+    if(url.pathname.startsWith('/api/auth/'))return authRoute(request,env,url.pathname.slice(10));
     if(url.pathname==='/api/discover' && request.method==='GET'){
       const market=request.cf?.country||request.headers.get('cf-ipcountry')||'';
       const offset=Math.max(-840,Math.min(840,Number(url.searchParams.get('offset'))||0))*60000;
