@@ -1,0 +1,9 @@
+{
+  "name": "setal-cinema",
+  "main": "cloudflare.mjs",
+  "compatibility_date": "2026-01-01",
+  "build": { "command": "if [ ! -f scripts/build.mjs ]; then python3 prepare-source.py; fi && node scripts/build.mjs" },
+  "rules": [{"type":"Text","globs":["**/*.sql"],"fallthrough":true}],
+  "assets": { "directory": "./dist/client", "binding": "ASSETS" },
+  "d1_databases": [{ "binding": "DB", "database_name": "setal-cinema" }]
+}
