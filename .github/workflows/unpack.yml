@@ -1,0 +1,24 @@
+name: Prepare SETAL Cinema source
+on:
+  push:
+    paths: ['.github/workflows/unpack.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and verify application
+        run: |
+          if [ -f SETAL-Cinema-source.zip ] && [ ! -f scripts/build.mjs ]; then
+            python3 prepare-source.py
+            node scripts/build.mjs
+            node --check dist/server/index.js
+            node --check dist/client/app.js
+            node --check cloudflare.mjs
+            git add -f dist drizzle scripts sports worker schema.sql .openai
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Unpack application with automatic catalog refresh'
+            git push origin HEAD:main
+          fi
