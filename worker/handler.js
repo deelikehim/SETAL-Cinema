@@ -178,20 +178,49 @@ async function cinebase(url,request,env){
 }
 
 async function viewerLibrary(request,env){
-  const owner=request.headers.get('oai-authenticated-user-id');
+  const account=request.headers.get('oai-authenticated-user-id');
   const reply=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'private, no-store'}});
-  if(!owner)return reply({signedIn:false},401);
+  if(!account)return reply({signedIn:false},401);
   try{
+    const profileId=new URL(request.url).searchParams.get('profile')||'main';
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS cinema_profiles(account TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, avatar TEXT NOT NULL, PRIMARY KEY(account,id))').run();
+    await env.DB.prepare("INSERT OR IGNORE INTO cinema_profiles VALUES(?,'main','My profile','fox')").bind(account).run();
+    const active=await env.DB.prepare('SELECT id,name,avatar FROM cinema_profiles WHERE account=? AND id=?').bind(account,profileId).first();
+    if(!active)return reply({error:'Profile no longer available.'},404);
+    const owner=profileId==='main'?account:JSON.stringify(['cinema-profile',account,profileId]);
     if(request.method==='GET'){
       const {results}=await env.DB.prepare('SELECT kind,item,season,episode FROM viewer_library WHERE owner=? ORDER BY updated_at DESC').bind(owner).all();
       const profile=await env.DB.prepare('SELECT photo FROM viewer_profile WHERE owner=?').bind(owner).first();
-      return reply({signedIn:true,photo:profile?.photo||null,email:request.headers.get('oai-authenticated-user-email'),entries:results.map(row=>({...row,item:JSON.parse(row.item)}))});
+      const profiles=await env.DB.prepare("SELECT id,name,avatar FROM cinema_profiles WHERE account=? ORDER BY (id='main') DESC,rowid").bind(account).all();
+      return reply({signedIn:true,active,profiles:profiles.results,photo:profile?.photo||null,email:request.headers.get('oai-authenticated-user-email'),entries:results.map(row=>({...row,item:JSON.parse(row.item)}))});
     }
     if(request.method!=='POST')return reply({},405);
     if(request.headers.get('Origin')!==new URL(request.url).origin)return reply({},403);
     const raw=await request.text();
     if(raw.length>90000)return reply({},413);
     const {kind,item,remove,photo,season=0,episode=0}=JSON.parse(raw);
+    if(['createProfile','editProfile','deleteProfile'].includes(kind)){
+      const {name,avatar}=JSON.parse(raw);
+      if(kind==='deleteProfile'){
+        if(profileId==='main')return reply({error:'Keep the main profile for this account.'},400);
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM cinema_profiles WHERE account=? AND id=?').bind(account,profileId),
+          env.DB.prepare('DELETE FROM viewer_library WHERE owner=?').bind(owner),
+          env.DB.prepare('DELETE FROM viewer_profile WHERE owner=?').bind(owner)
+        ]);
+        return reply({id:'main'});
+      }
+      if(typeof name!=='string'||!name.trim()||name.trim().length>40||!['fox','panda','frog','lion','koala','penguin','owl','tiger'].includes(avatar))return reply({error:'Choose a name and avatar.'},400);
+      if(kind==='createProfile'){
+        const id=crypto.randomUUID();
+        await env.DB.prepare('INSERT INTO cinema_profiles(account,id,name,avatar) VALUES(?,?,?,?)').bind(account,id,name.trim(),avatar).run();
+        return reply({id});
+      }
+      const updates=[env.DB.prepare('UPDATE cinema_profiles SET name=?,avatar=? WHERE account=? AND id=?').bind(name.trim(),avatar,account,profileId)];
+      if(JSON.parse(raw).useAvatar)updates.push(env.DB.prepare('DELETE FROM viewer_profile WHERE owner=?').bind(owner));
+      await env.DB.batch(updates);
+      return reply({id:profileId});
+    }
     if(kind==='photo'){
       if(typeof photo!=='string'||!/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/]+={0,2}$/.test(photo))return reply({},400);
       await env.DB.prepare('INSERT INTO viewer_profile(owner,photo) VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET photo=excluded.photo').bind(owner,photo).run();
@@ -219,14 +248,20 @@ export default {
       const market=request.cf?.country||request.headers.get('cf-ipcountry')||'';
       const offset=Math.max(-840,Math.min(840,Number(url.searchParams.get('offset'))||0))*60000;
       const start=Math.floor((Date.now()-offset)/86400000)*86400000+offset;
-      let shows=[];
+      let shows=[],historical=[];
       if(/^[A-Z]{2}$/.test(market)){
         const rows=await env.DB.prepare(`SELECT title_id,MAX(item) AS item,COUNT(DISTINCT owner) AS viewers FROM viewer_library
           WHERE kind='watched' AND updated_at>=? AND updated_at<? AND json_extract(item,'$.market')=? AND json_extract(item,'$.subjectType')=2
           GROUP BY title_id ORDER BY viewers DESC,MAX(updated_at) DESC LIMIT 10`).bind(start,start+86400000,market).all();
         shows=rows.results.map(row=>{const {market,progress,finished,...title}=JSON.parse(row.item);return title});
+        if(shows.length<10){
+          const archive=await env.DB.prepare(`SELECT title_id,MAX(item) AS item,COUNT(DISTINCT owner) AS viewers FROM viewer_library
+            WHERE kind='watched' AND json_extract(item,'$.market')=? AND json_extract(item,'$.subjectType')=2
+            GROUP BY title_id ORDER BY viewers DESC,MAX(updated_at) DESC LIMIT 10`).bind(market).all();
+          historical=archive.results.map(row=>{const {market,progress,finished,resumeHidden,...title}=JSON.parse(row.item);return title});
+        }
       }
-      return Response.json({market,shows},{headers:{'Cache-Control':'private, no-store'}});
+      return Response.json({market,shows,historical},{headers:{'Cache-Control':'private, no-store'}});
     }
     if(url.pathname==='/api/library')return viewerLibrary(request,env);
     if(request.method!=='GET' && request.method!=='HEAD')return new Response(null,{status:405});
