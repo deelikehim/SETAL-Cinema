@@ -38,6 +38,80 @@ function comparison(stats){
     return '<div class="metric"><div><strong>'+escape(a??'–')+'</strong><span>'+escape(label)+'</span><strong>'+escape(b??'–')+'</strong></div>'+bar+'</div>';
   }).join('');
 }
+function clubKey(team){
+  const name=typeof team==='string'?team:team?.nameI18n?.en||team?.name;
+  return String(name||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+    .replace(/\bman\s+(city|united|utd)\b/g,'manchester $1').replace(/\butd\b/g,'united')
+    .replace(/\b(fc|afc|cf)\b/g,'').replace(/[^a-z0-9]/g,'');
+}
+function fixtureCandidates(feed,event){
+  const expected=event.teams.map(clubKey).sort().join('|'), found=new Map();
+  function visit(row){
+    if(!row||typeof row!=='object')return;
+    const id=row.matchId||row.match_id||row.id;
+    const sides=[row.team1||row.homeTeam||row.home,row.team2||row.awayTeam||row.away];
+    if(id&&sides.every(Boolean)&&sides.map(clubKey).sort().join('|')===expected){
+      const raw=row.startTime||row.extras?.startTime||row.kickoff;
+      const time=/^\d+$/.test(raw)?Number(raw)*(String(raw).length<=10?1000:1):Date.parse(raw);
+      if(!Number.isFinite(time)||Math.abs(time-Date.parse(event.date))<=3*3600000)found.set(String(id),row);
+    }
+    Object.values(row).forEach(visit);
+  }
+  visit(feed);return [...found.keys()];
+}
+function videoUrl(value){
+  try{const url=new URL(value);if(['https:','http:'].includes(url.protocol))return url}catch{}
+}
+async function matchVideo(panel,event,signal){
+  const ended=event.state==='post';
+  const heading=document.createElement('h2');heading.textContent=ended?'Match replay':'Watch match';
+  const body=document.createElement('div');panel.append(heading,body);
+  function message(text,retry){
+    body.replaceChildren(document.createTextNode(text+' '));
+    if(retry){const button=document.createElement('button');button.className='chip';button.textContent='Check again';button.onclick=lookup;body.append(button)}
+  }
+  async function lookup(){
+    message('Checking match coverage…',false);
+    try{
+      const ids=fixtureCandidates(await json('/api/sports',signal),event);
+      if(ids.length!==1){message(ended?'No replay is listed for this match.':'No live feed is listed for this match yet.',true);return}
+      const detail=await json('/api/sports/match?id='+encodeURIComponent(ids[0]),signal);
+      if(signal.aborted)return;
+      const start=detail.extras?.startTime;
+      if(start&&Number(start)>0&&Math.abs(Number(start)*(String(start).length<=10?1000:1)-Date.parse(event.date))>3*3600000){
+        message('No video is listed for this fixture.',true);return;
+      }
+      const sources=ended?[...(detail.extras?.replay||[]),...(detail.extras?.highlights||[])]:[detail.stream?.main,...(detail.stream?.channels||[])];
+      const links=sources.map(x=>({url:videoUrl(typeof x==='string'?x:x?.path||x?.url),title:x?.title})).filter(x=>x.url);
+      const direct=links.find(x=>x.url.protocol==='https:'&&/\.(m3u8|mp4|webm)$/i.test(x.url.pathname));
+      if(!links.length){message(ended?'No replay is available yet.':'The provider has not posted a stream yet.',true);return}
+      body.replaceChildren();
+      if(direct){
+        const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='none';video.style.cssText='display:block;width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;margin-bottom:12px';
+        body.append(video);
+        const note=document.createElement('p');note.className='hint';body.append(note);
+        const failure=()=>{note.textContent='The video could not load here. Try a provider link below.'};
+        video.addEventListener('error',failure);
+        if(!/\.m3u8$/i.test(direct.url.pathname)||video.canPlayType('application/vnd.apple.mpegurl'))video.src=direct.url.href;
+        else{
+          try{
+            const {default:Hls}=await import('https://cdn.jsdelivr.net/npm/hls.js@1.6.13/+esm');
+            if(signal.aborted)return;
+            if(!Hls.isSupported())throw Error();
+            const hls=new Hls();signal.addEventListener('abort',()=>hls.destroy(),{once:true});
+            hls.on(Hls.Events.ERROR,(_,data)=>{if(data.fatal)failure()});
+            hls.loadSource(direct.url.href);hls.attachMedia(video);
+          }catch{failure()}
+        }
+      }else{body.append(document.createTextNode('Watch on a provider channel. '))}
+      for(const [i,source] of links.entries()){
+        const a=document.createElement('a');a.className='chip';a.href=source.url.href;a.target='_blank';a.rel='noopener noreferrer';
+        a.textContent=source.title||(source===direct?'Open video':'Channel '+(i+1));body.append(a,document.createTextNode(' '));
+      }
+    }catch{if(!signal.aborted)message('The video provider is unavailable right now.',true)}
+  }
+  await lookup();
+}
 async function report(root,q,league,signal){
   const back=link(q,{id:null,tab:null,competition:null});
   root.innerHTML='<section class="page sports-page"><a href="'+back+'">‹ Fixtures</a><div class="panel" role="status">Loading match centre…</div></section>';
@@ -58,6 +132,11 @@ async function report(root,q,league,signal){
   if(tab==='lineups')content=d.squads.some(t=>t.players.length)?'<div class="squad-grid">'+d.squads.map(playerGroups).join('')+'</div>':empty('Lineups');
   if(tab==='stats')content=d.stats.some(t=>t.values.length)?'<div class="compare-heading"><b>'+escape(d.stats[0].name)+'</b><b>'+escape(d.stats[1]?.name)+'</b></div>'+comparison(d.stats):empty('Stats');
   root.innerHTML='<article class="page sports-page report"><a class="fixtures-back" href="'+back+'">‹ All fixtures</a><header class="scoreboard"><h1>'+escape(league[1])+'</h1><div class="score-line">'+clubBadge(home)+'<div class="result"><strong>'+score+'</strong><span>'+escape(matchState)+'</span></div>'+clubBadge(away)+'</div><p>'+escape(longDate(dayOf(e.date)))+(d.venue?' · '+escape(d.venue):'')+'</p></header><nav aria-label="Match sections" class="report-tabs">'+Object.entries(tabs).map(([k,name])=>'<a '+(tab===k?'aria-current="page"':'')+' href="'+link(q,{tab:k})+'">'+name+'</a>').join('')+'</nav><section class="report-body"><h2>'+tabs[tab]+'</h2>'+content+'</section>'+(d.saved?'<p class="hint">Archived match report</p>':'')+'</article>';
+  if(tab==='overview'&&league[3]==='soccer'){
+    const panel=document.createElement('section');panel.className='report-body';
+    root.querySelector('.report-body').before(panel);
+    void matchVideo(panel,e,signal);
+  }
 }
 export async function fixturesPage(root,arg){
   active?.abort();active=new AbortController();const signal=active.signal;
