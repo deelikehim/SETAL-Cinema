@@ -341,3 +341,14 @@ body:has(.title-feature) .title-backdrop{width:100%;height:100%;max-width:none;o
 .category-feature p{margin:0;color:#f5eff0}.category-feature .actions{margin:0;gap:.5rem}
 @media(max-width:600px){.category-feature{min-height:19rem;border-radius:.8rem}.category-feature>img{object-position:center 30%}}
 
+.cinema-player.player-idle{cursor:none}
+.cinema-player.player-idle :is(.expand-player,.viewing-controls){visibility:hidden}
+.wake-player:not([hidden]){display:block;position:absolute;inset:0;width:100%;height:100%;z-index:4;border:0;background:transparent;cursor:inherit}
+.profile-choices,.profile-editor fieldset{display:flex;gap:.8rem;flex-wrap:wrap}
+.profile-choice,.avatar-choice{background:#322126;color:#fff;border:1px solid #60414a;border-radius:1rem;padding:.6rem;display:inline-grid;place-items:center;gap:.3rem;cursor:pointer}
+.profile-choice[aria-pressed=true],.avatar-choice:has(:checked){outline:2px solid #ff8094}
+.profile-choice span,.avatar-choice span{font-size:2rem;line-height:1.25}
+.avatar-choice{position:relative}.avatar-choice input{position:absolute;opacity:0}.avatar-choice:focus-within{outline:3px solid white}
+.profile-editor{margin-top:1rem}.profile-editor fieldset{margin:1rem 0;border:0;padding:0}.profile-editor legend{margin-bottom:.6rem}
+.profile-editor input[name=name]{padding:.6rem;border-radius:.5rem}
+

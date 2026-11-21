@@ -374,8 +374,8 @@ function dailyPicks(){
   }
   return [...records.values()].filter(x=>pic(x)&&!adultMovie(x)&&!seen.has(id(x))).sort((a,b)=>score(b)-score(a)).slice(0,12);
 }
-function homeRail(title,tiles){
-  return '<section class="shelf cinema-rail"><div class="sectionHead"><h2>'+esc(title)+'</h2><div class="shelf-tools"><button data-scroll="-1" aria-label="Scroll left">‹</button><button data-scroll="1" aria-label="Scroll right">›</button></div></div><div class="grid">'+tiles.join('')+'</div></section>';
+function homeRail(title,tiles,note=''){
+  return '<section class="shelf cinema-rail"><div class="sectionHead"><h2>'+esc(title)+'</h2><div class="shelf-tools"><button data-scroll="-1" aria-label="Scroll left">‹</button><button data-scroll="1" aria-label="Scroll right">›</button></div></div>'+(note?'<p class="hint">'+esc(note)+'</p>':'')+'<div class="grid">'+tiles.join('')+'</div></section>';
 }
 function picksRail(exclude){
   const picks=dailyPicks().filter(x=>!exclude||id(x)!==id(exclude));
@@ -448,10 +448,15 @@ function resumeRail(){
 function rankedRail(){
   let region='';
   try{if(discovery.market)region=new Intl.DisplayNames(undefined,{type:'region'}).of(discovery.market)}catch{}
-  const local=discovery.shows.length>0;
-  const shows=local?discovery.shows:catalogByType(2).filter(x=>!adultMovie(x)).sort((a,b)=>Number(b.imdbRatingValue||0)-Number(a.imdbRatingValue||0)).slice(0,10);
-  const title=local?'Top '+shows.length+' TV Shows in '+region+' Today':'Top 10 TV Shows by Catalog Rating';
-  return homeRail(title,shows.map((x,i)=>'<div class="rank-tile"><b aria-hidden="true">'+(i+1)+'</b>'+card(x)+'</div>'));
+  const local=discovery.shows.filter(x=>!adultMovie(x));
+  const marketShows=(discovery.historical||[]).filter(x=>!adultMovie(x));
+  const rated=catalogByType(2).filter(x=>!adultMovie(x)).sort((a,b)=>Number(b.imdbRatingValue||0)-Number(a.imdbRatingValue||0));
+  const unique=new Map();
+  for(const x of [...local,...marketShows,...rated])if(!unique.has(titleIdentity(x)))unique.set(titleIdentity(x),x);
+  const shows=[...unique.values()].slice(0,10);
+  const title=local.length>=10?'Top 10 TV Shows in '+region+' Today':(local.length||marketShows.length)?'Top 10 TV Shows for '+region:'Top 10 TV Shows by Catalog Rating';
+  const note=local.length<10&&(local.length||marketShows.length)?'Ranked first by today’s local viewing, then local viewing history. Any remaining places use catalog ratings.':'';
+  return homeRail(title,shows.map((x,i)=>'<div class="rank-tile"><b aria-hidden="true">'+(i+1)+'</b>'+card(x)+'</div>'),note);
 }
 function landing(){
   app.innerHTML=phoneCategories+hero(featured[feature],true)+'<div class="body discover-shelves">'+
@@ -611,6 +616,21 @@ function expandPlayer(video){
   video.replaceWith(wrap);wrap.append(video);
   const button=document.createElement('button');
   button.className='btn expand-player';button.textContent='Fullscreen';wrap.append(button);
+  const wake=document.createElement('button');
+  wake.type='button';wake.className='wake-player';wake.setAttribute('aria-label','Show playback controls');wake.hidden=true;wrap.append(wake);
+  let idle;
+  function show(){
+    clearTimeout(idle);wrap.classList.remove('player-idle');wake.hidden=true;video.controls=true;
+    idle=setTimeout(()=>{
+      if(!wrap.isConnected||wrap.querySelector(':focus-visible:not(video):not(.wake-player)'))return;
+      for(const panel of wrap.querySelectorAll('details[open]'))panel.open=false;
+      wrap.classList.add('player-idle');wake.hidden=false;video.controls=false;
+    },4000);
+  }
+  wake.onclick=show;
+  wrap.addEventListener('pointermove',e=>{if(e.pointerType!=='touch')show()});
+  for(const event of ['click','keydown','focusin','focusout'])wrap.addEventListener(event,show);
+  show();
   const exit=()=>{wrap.classList.remove('expanded');button.textContent='Fullscreen'};
   wrap.onfullscreenchange=()=>{button.textContent=document.fullscreenElement===wrap?'Exit fullscreen':'Fullscreen'};
   wrap.onkeydown=e=>{if(e.key==='Escape')exit()};
@@ -926,49 +946,88 @@ function titleSnapshot(x){
   if(!item.poster)item.poster=pic(x);
   return item;
 }
-async function loadViewer(){
+const avatars={fox:'🦊',panda:'🐼',frog:'🐸',lion:'🦁',koala:'🐨',penguin:'🐧',owl:'🦉',tiger:'🐯'};
+function libraryUrl(profile=viewer?.active?.id||'main'){return '/api/library?profile='+encodeURIComponent(profile)}
+function profileManager(){
+  return '<div class="panel profile-manager"><h2>Who’s watching?</h2><div class="profile-choices">'+viewer.profiles.map(p=>'<button type="button" class="profile-choice" data-switch="'+esc(p.id)+'" aria-pressed="'+(viewer.active.id===p.id)+'"><span>'+avatars[p.avatar]+'</span>'+esc(p.name)+'</button>').join('')+'</div><div class="actions"><button class="btn" data-profile-form="createProfile">Add profile</button><button class="btn" data-profile-form="editProfile">Edit current profile</button></div><div data-profile-editor></div><p role="status" data-profile-status></p></div>';
+}
+function bindProfiles(){
+  const panel=app.querySelector('.profile-manager');
+  if(!panel)return;
+  const editor=panel.querySelector('[data-profile-editor]'),status=panel.querySelector('[data-profile-status]');
+  async function change(action){
+    panel.inert=true;
+    try{
+      const profile=await action();
+      if(!await loadViewer(profile))throw Error('Could not open this profile.');
+      paintAccount();accountPage('profile');
+    }catch(error){status.textContent=error.message}
+    finally{panel.inert=false}
+  }
+  async function post(data){
+    const res=await fetch(libraryUrl(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    if(!res.ok)throw Error('Could not save this change. Try again.');
+    return (await res.json()).id;
+  }
+  panel.onclick=e=>{
+    const button=e.target.closest('button');if(!button)return;
+    if(button.dataset.switch){change(()=>button.dataset.switch);return}
+    if(!button.dataset.profileForm)return;
+    const kind=button.dataset.profileForm,editing=kind==='editProfile',active=viewer.active;
+    editor.innerHTML='<form class="profile-editor"><label>Profile name <input name="name" required maxlength="40" value="'+esc(editing?active.name:'')+'"></label><fieldset><legend>Choose an avatar</legend>'+Object.entries(avatars).map(([key,face])=>'<label class="avatar-choice"><input type="radio" name="avatar" value="'+key+'" '+(key===(editing?active.avatar:'fox')?'checked':'')+'><span aria-hidden="true">'+face+'</span><small>'+key+'</small></label>').join('')+'</fieldset><div class="actions"><button class="btn primary">Save profile</button><button type="button" class="btn" data-cancel>Cancel</button>'+(editing&&active.id!=='main'?'<button type="button" class="btn" data-delete>Delete profile</button>':'')+'</div></form>';
+    const form=editor.querySelector('form');form.elements.name.focus();
+    form.onsubmit=event=>{event.preventDefault();change(()=>post({kind,name:form.elements.name.value,avatar:form.elements.avatar.value,useAvatar:true}))};
+    editor.querySelector('[data-cancel]').onclick=()=>{editor.replaceChildren();button.focus()};
+    const del=editor.querySelector('[data-delete]');
+    if(del)del.onclick=()=>{if(confirm('Delete '+active.name+' and its watch history, downloads, and saved titles?'))change(()=>post({kind:'deleteProfile'}))};
+  };
+}
+async function loadViewer(profile=sessionStorage.getItem('sc-active-profile')||'main'){
   try{
-    const r=await fetch('/api/library',{cache:'no-store'});
+    const r=await fetch(libraryUrl(profile),{cache:'no-store'});
+    if(r.status===404&&profile!=='main')return loadViewer('main');
     if(r.status===401){accountError=false;return}
     if(!r.ok)throw Error();
     const data=await r.json();
-    viewer=data;accountError=false;library.length=0;watched.length=0;history.length=0;
+    sessionStorage.setItem('sc-active-profile',data.active.id);viewer=data;accountError=false;library.length=0;watched.length=0;history.length=0;
     for(const row of data.entries){
       if(!records.has(id(row.item)))remember(row.item);
       if(row.kind==='saved')library.push(records.get(id(row.item)));else if(row.kind==='watched')watched.push(row);else if(row.kind==='downloaded')history.push({...row.item,season:row.season,episode:row.episode,label:row.item.quality});
     }
-  }catch{accountError=true}
+    return true;
+  }catch{accountError=true;return false}
 }
 function trackProgress(video,x,season,episode){
   const matches=row=>id(row.item)===id(x)&&row.season===season&&row.episode===episode;
+  const profile=viewer.active.id;
   const prior=watched.find(matches)?.item;
   const restore=()=>{if(!prior?.finished&&prior?.progress?.time>0&&prior.progress.time<video.duration)video.currentTime=prior.progress.time};
   if(video.readyState>=1)restore();else video.addEventListener('loadedmetadata',restore,{once:true});
   let last=-1,chain=Promise.resolve();
   function save(){
-    if(!Number.isFinite(video.duration)||!video.currentTime)return;
+    if(viewer?.active.id!==profile||!Number.isFinite(video.duration)||!video.currentTime)return;
     const time=Math.floor(video.currentTime);
     if(time===last&&!video.ended)return;
     last=time;
     const extra={progress:{time,duration:Math.round(video.duration)},finished:video.ended};
     const index=watched.findIndex(matches);if(index>=0)watched.splice(index,1);
     watched.unshift({item:{...x,...extra},season,episode});
-    chain=chain.then(()=>writeEntry('watched',x,false,season,episode,'',extra)).catch(()=>{});
+    chain=chain.then(()=>writeEntry('watched',x,false,season,episode,'',extra,profile)).catch(()=>{});
   }
   video.addEventListener('timeupdate',()=>{if(last<0||Math.abs(video.currentTime-last)>=10)save()});
   for(const event of ['pause','ended','seeked'])video.addEventListener(event,save);
 }
-async function writeEntry(kind,x,remove=false,season=0,episode=0,quality='',extra={}){
-  const r=await fetch('/api/library',{method:'POST',headers:{'Content-Type':'application/json'},keepalive:kind!=='saved',body:JSON.stringify({kind,item:{...titleSnapshot(x),quality,...extra},remove,season:Number(season),episode:Number(episode)})});
+async function writeEntry(kind,x,remove=false,season=0,episode=0,quality='',extra={},profile=viewer?.active.id){
+  const r=await fetch(libraryUrl(profile),{method:'POST',headers:{'Content-Type':'application/json'},keepalive:kind!=='saved',body:JSON.stringify({kind,item:{...titleSnapshot(x),quality,...extra},remove,season:Number(season),episode:Number(episode)})});
   if(!r.ok)throw Error('Your library could not be updated. Please try again.');
 }
 function paintAccount(){
-  accountButton.title=viewer?'My profile':'Sign up or log in';
+  accountButton.title=viewer?'Manage profiles · '+viewer.active.name:'Sign up or log in';
   accountButton.setAttribute('aria-label',accountButton.title);
   accountButton.replaceChildren();
   if(viewer?.photo){
     const img=new Image();img.alt='';img.src=viewer.photo;accountButton.append(img);
-  }else if(viewer)accountButton.textContent=(viewer.email||'S')[0].toUpperCase();
+  }else if(viewer)accountButton.textContent=avatars[viewer.active.avatar];
   else accountButton.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>';
 }
 async function uploadPhoto(input){
@@ -982,7 +1041,7 @@ async function uploadPhoto(input){
     const side=Math.min(img.naturalWidth,img.naturalHeight);
     canvas.getContext('2d').drawImage(img,(img.naturalWidth-side)/2,(img.naturalHeight-side)/2,side,side,0,0,160,160);
     const photo=canvas.toDataURL('image/jpeg',0.82);
-    const r=await fetch('/api/library',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'photo',photo})});
+    const r=await fetch(libraryUrl(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'photo',photo})});
     if(!r.ok)throw Error();
     viewer.photo=photo;paintAccount();status.textContent='Photo saved.';
   }catch{status.textContent='Could not save this photo. Try a JPG, PNG or WebP image.'}
@@ -1006,8 +1065,9 @@ function accountPage(page){
   const tabs=[['watchlist','Saved for later'],['watched','Watch history'],['downloads','Download history']];
   const links=tabs.map(([key,name])=>'<a class="'+(page===key?'on':'')+'" href="#'+key+'">'+name+'</a>').join('');
   const legacy=read('setal-list',[]);
-  const content=page==='profile'?'<div class="panel"><label>Profile picture <input data-photo type="file" accept="image/jpeg,image/png,image/webp"></label><p data-photo-status role="status"></p></div>':page==='watchlist'?sortedWatchlist():page==='watched'?(watched.length?'<div class="grid">'+watched.map(row=>'<div>'+card(records.get(id(row.item))||row.item)+(row.season?'<small>Season '+esc(row.season)+' · Episode '+esc(row.episode)+'</small>':'')+'</div>').join('')+'</div>':'<p class="empty">Movies and episodes appear here when playback starts.</p>'):(history.length?history.map(y=>'<p class="panel">'+esc(y.title)+(y.episode?' · S'+esc(y.season)+' E'+esc(y.episode):'')+' · '+esc(y.label)+'</p>').join(''):'<p class="empty">Your download requests appear here.</p>');
+  const content=page==='profile'?profileManager()+'<div class="panel"><label>Upload a personal picture <input data-photo type="file" accept="image/jpeg,image/png,image/webp"></label><p data-photo-status role="status"></p></div>':page==='watchlist'?sortedWatchlist():page==='watched'?(watched.length?'<div class="grid">'+watched.map(row=>'<div>'+card(records.get(id(row.item))||row.item)+(row.season?'<small>Season '+esc(row.season)+' · Episode '+esc(row.episode)+'</small>':'')+'</div>').join('')+'</div>':'<p class="empty">Movies and episodes appear here when playback starts.</p>'):(history.length?history.map(y=>'<p class="panel">'+esc(y.title)+(y.episode?' · S'+esc(y.season)+' E'+esc(y.episode):'')+' · '+esc(y.label)+'</p>').join(''):'<p class="empty">Your download requests appear here.</p>');
   app.innerHTML=shell+'<p>'+esc(viewer.email||'Signed in')+' · <a target="_top" href="/cdn-cgi/access/logout">Log out</a></p><div class="pageTabs">'+links+'</div>'+(page==='watchlist'&&legacy.length?'<button class="btn" data-import-saved>Import bookmarks from this browser</button>':'')+content+'</section>';
+  bindProfiles();
   const photo=app.querySelector('[data-photo]');if(photo)photo.onchange=()=>uploadPhoto(photo);
 }
 
@@ -1056,7 +1116,7 @@ document.addEventListener('visibilitychange',refreshProviderCatalog);
 
 fetch('/api/discover?offset='+new Date().getTimezoneOffset()).then(r=>r.json()).then(data=>{
   if(!Array.isArray(data.shows))return;
-  discovery=data;data.shows.forEach(remember);
+  discovery=data;data.shows.forEach(remember);(data.historical||[]).forEach(remember);
   if(!location.hash||location.hash==='#home')landing();
 }).catch(()=>{});
 
