@@ -190,12 +190,16 @@ async function initAuth(db){
     'CREATE TABLE IF NOT EXISTS sc_login_sessions (token TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS sc_legacy_claims (token TEXT PRIMARY KEY,owner TEXT NOT NULL,email TEXT NOT NULL,expires INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS sc_owner_links (account TEXT PRIMARY KEY,owner TEXT UNIQUE NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS sc_signin_links (digest TEXT PRIMARY KEY,account TEXT NOT NULL,expires INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS sc_login_attempts (bucket TEXT PRIMARY KEY,n INTEGER NOT NULL,expires INTEGER NOT NULL)'
   ].map(sql=>db.prepare(sql))).catch(e=>{authSchema=null;throw e});
   await authSchema;
 }
+function sessionToken(request){
+  return request.headers.get('X-SCinema-Session')||cookieValue(request,sessionCookie);
+}
 async function sessionIdentity(request,env){
-  const token=cookieValue(request,sessionCookie);
+  const token=sessionToken(request);
   if(!/^[a-f0-9]{64}$/.test(token))return null;
   await initAuth(env.DB);
   return env.DB.prepare('SELECT COALESCE(l.owner,a.id) AS id,a.email,a.name FROM sc_login_sessions s JOIN sc_login_accounts a ON a.id=s.owner LEFT JOIN sc_owner_links l ON l.account=a.id WHERE s.token=? AND s.expires>?').bind(await digest(token),Date.now()).first();
@@ -207,13 +211,14 @@ async function passwordHash(password,salt){
 function authJson(data,status=200){return Response.json(data,{status,headers:{'Cache-Control':'no-store'}})}
 async function issueSession(request,db,account){
   const token=randomToken(),now=Date.now(),age=30*86400;
-  await db.batch([db.prepare('DELETE FROM sc_login_sessions WHERE expires<=? OR token=?').bind(now,await digest(cookieValue(request,sessionCookie))),db.prepare('INSERT INTO sc_login_sessions VALUES(?,?,?)').bind(await digest(token),account.id,now+age*1000)]);
+  await db.batch([db.prepare('DELETE FROM sc_login_sessions WHERE expires<=? OR token=?').bind(now,await digest(sessionToken(request))),db.prepare('INSERT INTO sc_login_sessions VALUES(?,?,?)').bind(await digest(token),account.id,now+age*1000)]);
   const proof=cookieValue(request,'__Host-sc-claim');
   if(proof){
     const key=await digest(proof);
     await db.batch([db.prepare('INSERT OR IGNORE INTO sc_owner_links(account,owner) SELECT a.id,c.owner FROM sc_login_accounts a JOIN sc_legacy_claims c ON lower(a.email)=lower(c.email) WHERE a.id=? AND c.token=? AND c.expires>?').bind(account.id,key,now),db.prepare('DELETE FROM sc_legacy_claims WHERE token=? OR expires<=?').bind(key,now)]);
   }
-  const res=authJson({ok:true});res.headers.append('Set-Cookie',cookie(sessionCookie,token,age));return res;
+  const tab=request.method==='POST'&&request.headers.get('X-SCinema-Client')==='tab';
+  const res=authJson(tab?{ok:true,tabSession:token}:{ok:true});res.headers.append('Set-Cookie',cookie(sessionCookie,token,age));return res;
 }
 async function authRoute(request,env,path){
   const url=new URL(request.url),db=env.DB;
@@ -241,8 +246,36 @@ async function authRoute(request,env,path){
     }
     if(request.method!=='POST'||request.headers.get('Origin')!==url.origin)return authJson({},403);
     if(path==='logout'){
-      await db.prepare('DELETE FROM sc_login_sessions WHERE token=?').bind(await digest(cookieValue(request,sessionCookie))).run();
+      await db.prepare('DELETE FROM sc_login_sessions WHERE token=?').bind(await digest(sessionToken(request))).run();
       const res=authJson({ok:true});res.headers.append('Set-Cookie',cookie(sessionCookie,'',0));return res;
+    }
+    if(path==='find'){
+      const text=await request.text();if(text.length>1024)return authJson({},413);
+      const {email}=JSON.parse(text),identity=await sessionIdentity(request,env);
+      if(typeof email!=='string'||email.length>254)return authJson({},400);
+      const address=email.trim().toLowerCase();
+      if(identity&&identity.email.toLowerCase()===address)return authJson({canContinue:true});
+      if(!env.RESEND_API_KEY||!env.SIGNIN_EMAIL_FROM)return authJson({canContinue:false});
+      const now=Date.now();
+      const bucket='mail-'+await digest((request.headers.get('CF-Connecting-IP')||'shared')+'|'+Math.floor(now/600000));
+      const throttle=await db.prepare('INSERT INTO sc_login_attempts VALUES(?,1,?) ON CONFLICT(bucket) DO UPDATE SET n=n+1 RETURNING n').bind(bucket,now+600000).first();
+      if(throttle.n>10)return authJson({error:'Please wait before requesting another sign-in link.'},429);
+      const user=await db.prepare("SELECT id FROM sc_login_accounts WHERE lower(email)=? ORDER BY (method='google') DESC LIMIT 1").bind(address).first();
+      if(user){
+        const token=randomToken(),key=await digest(token);
+        await db.batch([db.prepare('DELETE FROM sc_signin_links WHERE expires<=? OR account=?').bind(now,user.id),db.prepare('INSERT INTO sc_signin_links VALUES(?,?,?)').bind(key,user.id,now+600000)]);
+        const result=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+env.RESEND_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({from:env.SIGNIN_EMAIL_FROM,to:[address],subject:'Your SCinema sign-in link',text:'Open this link within 10 minutes to sign in to SCinema. If you did not request it, you can ignore this email.\n\n'+url.origin+'/#email-signin/'+token})});
+        if(!result.ok)await db.prepare('DELETE FROM sc_signin_links WHERE digest=?').bind(key).run();
+      }
+      return authJson({canContinue:false,emailLink:true});
+    }
+    if(path==='redeem'){
+      const raw=await request.text();if(raw.length>200)return authJson({},400);
+      const {token}=JSON.parse(raw);
+      if(typeof token!=='string'||!/^[0-9a-f]{64}$/.test(token))return authJson({},400);
+      const link=await db.prepare('DELETE FROM sc_signin_links WHERE digest=? AND expires>? RETURNING account').bind(await digest(token),Date.now()).first();
+      if(!link)return authJson({error:'This link has expired or was already used. Request another link.'},401);
+      return issueSession(request,db,{id:link.account});
     }
     if(!['register','login'].includes(path))return authJson({},404);
     const now=Date.now(),bucket=await digest((request.headers.get('CF-Connecting-IP')||'shared')+'|'+Math.floor(now/600000));
