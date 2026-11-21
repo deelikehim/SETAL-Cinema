@@ -1058,15 +1058,51 @@ function sortedWatchlist(){
 document.addEventListener('change',event=>{
   if(event.target.id==='watch-order'){localStorage.setItem('sc-list-order',JSON.stringify(event.target.value));accountPage('watchlist');document.querySelector('#watch-order')?.focus()}
 });
+function signInPanel(page){
+  app.innerHTML='<section class="account-page"><div class="account-heading"><h1>Your SCinema account</h1><p>Keep your profiles, watch history and saved titles together.</p></div><div class="access-panel"><div class="account-tabs"><button type="button" data-mode="login">Sign in</button><button type="button" data-mode="register">Create account</button></div><a class="btn google-auth" data-google hidden target="_top" href="/api/auth/google">Continue with Google</a><form data-auth><label data-name>Your name<input name="name" autocomplete="name" maxlength="80"></label><label>Email<input type="email" name="email" autocomplete="email" required maxlength="254"></label><label>Password<input name="password" type="password" required maxlength="256"></label><button class="btn primary" type="submit"></button><p role="status"></p></form></div></section>';
+  const form=app.querySelector('[data-auth]'),notice=form.querySelector('[role=status]'),google=app.querySelector('[data-google]');
+  fetch('/api/auth/options').then(r=>r.json()).then(data=>{google.hidden=!data.google}).catch(()=>{});
+  let mode;
+  function choose(next){
+    mode=next;const create=mode==='register';
+    form.querySelector('[data-name]').hidden=!create;form.elements.name.required=create;
+    form.elements.password.autocomplete=create?'new-password':'current-password';form.elements.password.minLength=create?12:1;
+    form.elements.password.placeholder=create?'At least 12 characters':'';
+    form.querySelector('button').textContent=create?'Create account':'Sign in';
+    for(const b of app.querySelectorAll('[data-mode]'))b.setAttribute('aria-pressed',String(mode===b.dataset.mode));
+    notice.textContent='';
+  }
+  for(const b of app.querySelectorAll('[data-mode]'))b.onclick=()=>choose(b.dataset.mode);
+  choose('login');
+  if(new URLSearchParams(location.search).has('signedout')){notice.textContent='You’re signed out.';window.history.replaceState(null,'',location.pathname+location.hash)}
+  if(new URLSearchParams(location.search).has('signin')){notice.textContent='Google sign-in did not finish. Try again or use email.';window.history.replaceState(null,'',location.pathname+location.hash)}
+  form.onsubmit=async e=>{
+    e.preventDefault();const submit=form.querySelector('button');submit.disabled=true;notice.textContent='Signing in…';
+    try{
+      const r=await fetch('/api/auth/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(form)))});
+      const result=await r.json();if(!r.ok)throw Error(result.error||'Sign-in failed.');
+      if(!await loadViewer('main'))throw Error('Could not open your profile. Try again.');
+      paintAccount();accountPage(page);
+    }catch(error){notice.textContent=error.message}finally{submit.disabled=false}
+  };
+}
+
 function accountPage(page){
-  const shell='<section class="page"><h1>'+(page==='profile'?'My profile':'My library')+'</h1>';
+  const shell='<section class="page account-page"><h1>'+(page==='profile'?'My profile':'My library')+'</h1>';
   if(accountError){app.innerHTML=shell+'<p>Could not load your account.</p><button class="btn" data-library-retry>Try again</button></section>';return}
-  if(!viewer){app.innerHTML=shell+'<p>Sign in to save titles for later and view your watch and download history.</p><a class="btn primary" target="_top" href="/account/login">Sign in</a></section>';return}
+  if(!viewer){signInPanel(page);return}
   const tabs=[['watchlist','Saved for later'],['watched','Watch history'],['downloads','Download history']];
   const links=tabs.map(([key,name])=>'<a class="'+(page===key?'on':'')+'" href="#'+key+'">'+name+'</a>').join('');
   const legacy=read('setal-list',[]);
   const content=page==='profile'?profileManager()+'<div class="panel"><label>Upload a personal picture <input data-photo type="file" accept="image/jpeg,image/png,image/webp"></label><p data-photo-status role="status"></p></div>':page==='watchlist'?sortedWatchlist():page==='watched'?(watched.length?'<div class="grid">'+watched.map(row=>'<div>'+card(records.get(id(row.item))||row.item)+(row.season?'<small>Season '+esc(row.season)+' · Episode '+esc(row.episode)+'</small>':'')+'</div>').join('')+'</div>':'<p class="empty">Movies and episodes appear here when playback starts.</p>'):(history.length?history.map(y=>'<p class="panel">'+esc(y.title)+(y.episode?' · S'+esc(y.season)+' E'+esc(y.episode):'')+' · '+esc(y.label)+'</p>').join(''):'<p class="empty">Your download requests appear here.</p>');
-  app.innerHTML=shell+'<p>'+esc(viewer.email||'Signed in')+' · <a target="_top" href="/cdn-cgi/access/logout">Log out</a></p><div class="pageTabs">'+links+'</div>'+(page==='watchlist'&&legacy.length?'<button class="btn" data-import-saved>Import bookmarks from this browser</button>':'')+content+'</section>';
+  app.innerHTML=shell+'<div class="account-identity"><div><strong>'+esc(viewer.name||viewer.active.name)+'</strong><small>'+esc(viewer.email)+'</small></div><button type="button" class="btn account-logout">Log out</button></div><div class="pageTabs account-links">'+links+'</div>'+(page==='watchlist'&&legacy.length?'<button class="btn" data-import-saved>Import bookmarks from this browser</button>':'')+content+'</section>';
+  app.querySelector('.account-logout').onclick=async e=>{
+    const button=e.currentTarget;button.disabled=true;
+    try{
+      const result=await fetch('/api/auth/logout',{method:'POST'});if(!result.ok)throw Error();
+      sessionStorage.removeItem('sc-active-profile');location.replace(location.pathname+'?signedout=1#profile');
+    }catch{button.disabled=false;button.textContent='Retry logout'}
+  };
   bindProfiles();
   const photo=app.querySelector('[data-photo]');if(photo)photo.onchange=()=>uploadPhoto(photo);
 }
