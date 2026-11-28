@@ -82,31 +82,62 @@ async function downloadFile(params,request,watch){
     return fileError('Setal could not complete the request to the '+stage+'. Try again later.',502);
   }
 }
+const captionCache=new Map();
+let captionCatalog;
+async function subtitleTracks(slug,season,episode,subject,key){
+  if(!subject){
+    captionCatalog??=new Map(Object.values(JSON.parse(pages['/catalog.json'].body)).flat().filter(x=>x.detailPath&&x.subjectId).map(x=>[x.detailPath,String(x.subjectId)]));
+    subject=captionCatalog.get(slug)||'';
+  }
+  const cacheKey=JSON.stringify([slug,season,episode,subject]),cached=captionCache.get(cacheKey);
+  if(cached&&cached.until>Date.now())return cached.list;
+  const params=new URLSearchParams({id:slug});
+  if(season){params.set('season',season);params.set('episode',episode)}
+  const base='https://api.globalmovie.site/proxy-api/api/';
+  const feeds=[];
+  if(key)feeds.push([new URL('subtitles?'+new URLSearchParams([...params,['apikey',key]]),base),'GlobalMovie subtitles']);
+  feeds.push([new URL((season?'tv?':'movie?')+params,base),'GlobalMovie title']);
+  if(/^\d+$/.test(subject))feeds.push([new URL('https://api.omegatech.app/api/movie/MovieBox-pro2?'+new URLSearchParams({action:'download',subjectId:subject,detailPath:slug,season,episode,se:season,ep:episode})),'MovieBox subtitles']);
+  let empty=false;
+  const failures=[];
+  for(const [url,label] of feeds){
+    try{
+      const res=await fetch(url,{redirect:'manual',headers:{Accept:'application/json'},signal:AbortSignal.timeout(7000)});
+      if(!res.ok){failures.push(label+' returned HTTP '+res.status);continue}
+      const data=await res.json();
+      if(data.error||data.success===false||Number(data.statusCode)>=400){failures.push(label+' reported a provider error');continue}
+      if(data.detailPath&&data.detailPath!==slug||data.season!=null&&Number(data.season)!==season||data.episode!=null&&Number(data.episode)!==episode){failures.push(label+' returned a different title or episode');continue}
+      const list=[data.captions,data.subtitles,data.data?.captions,data.data?.subtitles,data.data,data].find(v=>Array.isArray(v)&&v.length)||[];
+      if(!list.length){empty=true;continue}
+      const tracks=list.filter(t=>typeof t?.url==='string'&&t.url.startsWith('https://')).map((t,i)=>({
+        id:String(t.id??i),url:t.url,lan:t.lan||t.lang||t.language||'und',lanName:t.lanName||t.langName||t.label||t.language
+      }));
+      if(!tracks.length){failures.push(label+' returned no readable track URLs');continue}
+      if(captionCache.size>=64)captionCache.delete(captionCache.keys().next().value);
+      captionCache.set(cacheKey,{list:tracks,until:Date.now()+60000});return tracks;
+    }catch(error){failures.push(label+(['AbortError','TimeoutError'].includes(error.name)?' timed out':' could not return readable track data'))}
+  }
+  if(empty&&!failures.length)return [];
+  return fileError('Subtitle lookup: '+failures.join('. ')+(empty?'. The remaining source supplied no tracks.':'.'),502);
+}
+
 async function mediaExtras(url,env){
   const q=url.searchParams,slug=q.get('detailPath')||'',season=Number(q.get('season')),episode=Number(q.get('episode'));
   if(!/^[\w-]{1,300}$/.test(slug)||![season,episode].every(n=>Number.isSafeInteger(n)&&n>=0))return fileError('Invalid title.',400);
   const listing=url.pathname.endsWith('/season');
-  const u=new URL(listing?'episode-matrix':'subtitles','https://api.globalmovie.site/proxy-api/api/');
-  u.searchParams.set('id',slug);
-  if(!listing){
-    if(!env.CINEBASE_API_KEY)return fileError('The subtitle provider key is missing.',503);
-    u.searchParams.set('apikey',env.CINEBASE_API_KEY);
-  }
-  if(season){u.searchParams.set('season',season);u.searchParams.set('episode',listing?1:episode)}
   try{
-    const r=await fetch(u,{method:'GET',redirect:'error',signal:AbortSignal.timeout(15000)});
-    if(!r.ok)throw Error();
-    const d=await r.json();
     if(listing){
+      const u=new URL('https://api.globalmovie.site/proxy-api/api/episode-matrix');
+      u.search=new URLSearchParams({id:slug,season,episode:1});
+      const r=await fetch(u,{signal:AbortSignal.timeout(15000)});
+      if(!r.ok)return fileError('Season provider returned HTTP '+r.status+'.',502);
+      const d=await r.json();
       const info=d.seasonInfo;
       if(Number(info?.season)!==season||!Number.isSafeInteger(Number(info.maxEp))||Number(info.maxEp)<1)return fileError('Season unavailable.',404);
       return Response.json({count:Number(info.maxEp)});
     }
-    const list=[d.captions,d.subtitles,d.data?.captions,d.data?.subtitles].find(items=>Array.isArray(items)&&items.length)||[];
-    const tracks=list.filter(t=>t?.url).map((t,i)=>({
-      id:String(t.id??i),url:t.url,lan:t.lan||t.lang||t.language||'und',
-      lanName:t.lanName||t.langName||t.label||t.language
-    }));
+    const tracks=await subtitleTracks(slug,season,episode,q.get('subjectId')||'',env.CINEBASE_API_KEY);
+    if(tracks instanceof Response)return tracks;
     const language=q.get('language');
     if(!language&&!q.has('track'))return Response.json(tracks.map(t=>({id:String(t.id),language:t.lan==='in_id'?'id':t.lan,label:t.lanName||t.lan})));
     const track=language?tracks.find(t=>(t.lan==='in_id'?'id':t.lan)===language):tracks.find(t=>String(t.id)===q.get('track'));
@@ -114,8 +145,9 @@ async function mediaExtras(url,env){
     const file=new URL(track.url);
     if(file.protocol!=='https:'||file.hostname!=='cacdn.hakunaymatata.com')return fileError('Subtitle host unavailable.',502);
     const sub=await fetch(file,{redirect:'error',signal:AbortSignal.timeout(15000)});
-    if(!sub.ok)throw Error();
+    if(!sub.ok)return fileError('Subtitle file host returned HTTP '+sub.status+'.',502);
     const raw=(await sub.text()).replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n');
+    if(!raw.includes('-->'))return fileError('The subtitle file contains no timed captions.',502);
     if(language){
       const ext=raw.startsWith('WEBVTT')?'vtt':'srt';
       const name=slug+(season?'-S'+season+'E'+episode:'')+'.'+language.replace(/[^a-z0-9_-]/gi,'')+'.'+ext;
@@ -187,6 +219,9 @@ let authSchema;
 async function initAuth(db){
   if(!authSchema)authSchema=db.batch([
     'CREATE TABLE IF NOT EXISTS sc_login_accounts (id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL,method TEXT NOT NULL,login TEXT NOT NULL,salt TEXT,hash TEXT,UNIQUE(method,login))',
+    "CREATE TABLE IF NOT EXISTS sc_memberships (account TEXT PRIMARY KEY,plan TEXT NOT NULL CHECK(plan IN ('Free','Pro')),changed_by TEXT NOT NULL,changed_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS sc_notices (account TEXT NOT NULL,kind TEXT NOT NULL,seen INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,kind))",
+    "CREATE TRIGGER IF NOT EXISTS sc_welcome AFTER INSERT ON sc_login_accounts BEGIN INSERT OR IGNORE INTO sc_notices(account,kind) VALUES(NEW.id,'welcome'); END",
     'CREATE TABLE IF NOT EXISTS sc_login_sessions (token TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS sc_legacy_claims (token TEXT PRIMARY KEY,owner TEXT NOT NULL,email TEXT NOT NULL,expires INTEGER NOT NULL)',
     'CREATE TABLE IF NOT EXISTS sc_owner_links (account TEXT PRIMARY KEY,owner TEXT UNIQUE NOT NULL)',
@@ -202,7 +237,7 @@ async function sessionIdentity(request,env){
   const token=sessionToken(request);
   if(!/^[a-f0-9]{64}$/.test(token))return null;
   await initAuth(env.DB);
-  return env.DB.prepare('SELECT COALESCE(l.owner,a.id) AS id,a.email,a.name FROM sc_login_sessions s JOIN sc_login_accounts a ON a.id=s.owner LEFT JOIN sc_owner_links l ON l.account=a.id WHERE s.token=? AND s.expires>?').bind(await digest(token),Date.now()).first();
+  return env.DB.prepare('SELECT COALESCE(l.owner,a.id) AS id,a.id AS accountId,a.email,a.name FROM sc_login_sessions s JOIN sc_login_accounts a ON a.id=s.owner LEFT JOIN sc_owner_links l ON l.account=a.id WHERE s.token=? AND s.expires>?').bind(await digest(token),Date.now()).first();
 }
 async function passwordHash(password,salt){
   const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);
@@ -300,6 +335,31 @@ async function authRoute(request,env,path){
   }catch{return authJson({error:'Sign-in is temporarily unavailable. Please try again.'},503)}
 }
 
+function isManager(identity,env){
+  return !!identity?.accountId&&identity.accountId===env.SETAL_MANAGER_ACCOUNT_ID;
+}
+async function accountSupport(request,env,url){
+  const user=await sessionIdentity(request,env);
+  if(!user)return authJson({error:'Sign in to continue.'},401);
+  const db=env.DB;
+  const post=request.method==='POST';
+  if(post&&(request.headers.get('Origin')!==url.origin||!request.headers.get('Content-Type')?.startsWith('application/json')))return authJson({},403);
+  if(url.pathname==='/api/notifications'&&post){
+    await db.prepare('UPDATE sc_notices SET seen=1 WHERE account=?').bind(user.accountId).run();
+    return authJson({ok:true});
+  }
+  if(url.pathname!=='/api/manage'||!isManager(user,env))return authJson({},403);
+  if(request.method==='GET'){
+    const email=(url.searchParams.get('email')||'').trim();
+    const rows=await db.prepare("SELECT a.id,a.email,a.name,a.method,COALESCE(m.plan,'Free') AS plan FROM sc_login_accounts a LEFT JOIN sc_memberships m ON m.account=a.id WHERE lower(a.email)=lower(?) LIMIT 10").bind(email).all();
+    return authJson({accounts:rows.results});
+  }
+  if(!post)return authJson({},405);
+  const input=await request.json().catch(()=>null);
+  if(!input||typeof input.account!=='string'||!['Free','Pro'].includes(input.plan))return authJson({error:'Choose an account and plan.'},400);
+  const result=await db.prepare('INSERT INTO sc_memberships(account,plan,changed_by,changed_at) SELECT id,?,?,? FROM sc_login_accounts WHERE id=? ON CONFLICT(account) DO UPDATE SET plan=excluded.plan,changed_by=excluded.changed_by,changed_at=excluded.changed_at').bind(input.plan,user.accountId,Date.now(),input.account).run();
+  return authJson({ok:!!result.meta.changes},result.meta.changes?200:404);
+}
 async function viewerLibrary(request,env){
   const identity=await sessionIdentity(request,env);
   const account=identity?.id;
@@ -325,7 +385,9 @@ async function viewerLibrary(request,env){
       const {results}=await env.DB.prepare('SELECT kind,item,season,episode FROM viewer_library WHERE owner=? ORDER BY updated_at DESC').bind(owner).all();
       const profile=await env.DB.prepare('SELECT photo FROM viewer_profile WHERE owner=?').bind(owner).first();
       const profiles=await env.DB.prepare("SELECT id,name,avatar FROM cinema_profiles WHERE account=? ORDER BY (id='main') DESC,rowid").bind(account).all();
-      return reply({signedIn:true,active,profiles:profiles.results,photo:profile?.photo||null,email:identity.email,name:identity.name,entries:results.map(row=>({...row,item:JSON.parse(row.item)}))});
+      const membership=await env.DB.prepare('SELECT plan FROM sc_memberships WHERE account=?').bind(identity.accountId).first();
+      const notices=await env.DB.prepare('SELECT kind,seen FROM sc_notices WHERE account=?').bind(identity.accountId).all();
+      return reply({signedIn:true,accountId:identity.accountId,canManage:isManager(identity,env),plan:membership?.plan||'Free',notices:notices.results,active,profiles:profiles.results,photo:profile?.photo||null,email:identity.email,name:identity.name,entries:results.map(row=>({...row,item:JSON.parse(row.item)}))});
     }
     if(request.method!=='POST')return reply({},405);
     if(request.headers.get('Origin')!==new URL(request.url).origin)return reply({},403);
@@ -377,6 +439,7 @@ async function viewerLibrary(request,env){
 export default {
   async fetch(request,env){
     const url=new URL(request.url);
+    if(['/api/manage','/api/notifications'].includes(url.pathname))return accountSupport(request,env,url);
     if(url.pathname.startsWith('/api/auth/'))return authRoute(request,env,url.pathname.slice(10));
     if(url.pathname==='/api/discover' && request.method==='GET'){
       const market=request.cf?.country||request.headers.get('cf-ipcountry')||'';
@@ -402,6 +465,24 @@ export default {
     if(['/api/cinebase/subtitles','/api/cinebase/season'].includes(url.pathname))return mediaExtras(url,env);
     if(['/api/cinebase/options','/api/cinebase/stream','/api/cinebase/download'].includes(url.pathname))return cinebase(url,request,env);
     if(url.pathname==='/api/fixtures')return fixturesApi(url);
+    if(url.pathname==='/api/sports/feed'){
+      const action=url.searchParams.get('action');
+      if(!['leagues','matches','live','stream','news','aggregate','info'].includes(action))return fileError('Unknown sports action.',400);
+      const api=new URL('https://api.omegatech.app/api/Sport/Sport');
+      api.searchParams.set('action',action);
+      for(const key of ['matchId','leagueId','status','date','page','perPage']){
+        const value=url.searchParams.get(key);
+        if(value&&value.length<=40)api.searchParams.set(key,value);
+      }
+      if(action==='stream'&&!/^\d{1,24}$/.test(api.searchParams.get('matchId')||''))return fileError('Invalid fixture.',400);
+      try{
+        const result=await fetch(api,{signal:AbortSignal.timeout(12000),headers:{Accept:'application/json'},cache:'no-store'});
+        if(!result.ok)return fileError('Sports feed unavailable.',502);
+        const data=JSON.parse((await result.text()).replace(/("(?:id|matchId|leagueId)"\s*:\s*)(\d{16,})(?=\s*[,}])/g,'$1"$2"'));
+        if(data.success===false||!data.data)return fileError('Sports feed unavailable.',502);
+        return Response.json(data.data,{headers:{'Cache-Control':action==='stream'?'no-store':'public, max-age=20'}});
+      }catch{return fileError('Sports feed unavailable.',502)}
+    }
     if(url.pathname==='/api/sports' || url.pathname==='/api/sports/match'){
       const detail=url.pathname.endsWith('/match');
       const id=url.searchParams.get('id');
