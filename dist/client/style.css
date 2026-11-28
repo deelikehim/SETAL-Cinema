@@ -361,3 +361,80 @@ body:has(.title-feature) .title-backdrop{width:100%;height:100%;max-width:none;o
 .account-page .profile-manager h2{font-size:clamp(1.6rem,4vw,2.15rem);margin:0 0 1rem}.account-page .panel{margin:1rem 0}
 .access-panel{max-width:30rem;margin-top:1.25rem}.account-tabs{display:flex;gap:.35rem;background:#1a1114;padding:.3rem;border-radius:2rem;margin-bottom:1rem}.account-tabs button{flex:1;background:transparent;color:#eee;border:0;border-radius:2rem;min-height:2.6rem;font:inherit;cursor:pointer}.account-tabs [aria-pressed=true]{background:#f3e7eb;color:#28151b}
 .access-panel label{display:grid;gap:.4rem;margin:.85rem 0}.access-panel input{width:100%;padding:.8rem;border-radius:.6rem;border:1px solid #795962;background:#180f13;color:white;font:inherit}.access-panel .btn{margin:.45rem 0;justify-content:center}.access-panel [hidden]{display:none!important}.access-panel [role=status]:empty{display:none}.google-auth{width:100%}
+
+.sc-bell{position:relative}.sc-bell[hidden]{display:none!important}.sc-bell.unread::after{content:'';position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:#ff546c}.account-page code{overflow-wrap:anywhere}
+
+.wordmark{display:none}
+body:has(.title-feature) .title-feature:after{background:linear-gradient(90deg,#130b1099,transparent 57%)}
+.title-copy{color:white;text-shadow:0 1px 5px #12090d}
+.title-feature+.body{position:relative}
+.auth-screen.account-page{position:relative;isolation:isolate;overflow:hidden;max-width:none;min-height:86svh;display:grid;place-items:center;background:#1b1014;padding:3rem 1rem 7rem}
+.poster-wall{position:absolute;inset:-25%;display:grid;grid-template-columns:repeat(8,1fr);transform:rotate(-9deg);gap:8px;z-index:-2;pointer-events:none}
+.poster-wall img{width:100%;height:100%;max-height:36vh;object-fit:cover}
+.auth-screen:before{content:"";position:absolute;inset:0;background:#170c13a1;z-index:-1}
+.auth-box{width:min(100%,27rem);padding:clamp(1.2rem,4vw,2.2rem);background:#130e12f5;border:1px solid #ffffff29;border-radius:18px}
+.auth-box .access-panel{background:none;border:0;padding:0}.auth-box .primary{width:100%;background:#be1933;color:white}
+.account-page:has(.profile-manager)>h1{position:absolute;clip-path:inset(50%);width:1px;height:1px;overflow:hidden}
+.account-page .profile-manager{text-align:center;background:transparent;border:0;padding:1.5rem 0}
+.profile-manager .profile-choices,.profile-manager .actions{justify-content:center}
+.profile-manager .profile-choice{border:none;background:transparent;font-size:.9rem;padding:.35rem}
+.profile-manager .profile-choice span{display:grid;place-items:center;width:clamp(3.8rem,11vw,6.6rem);aspect-ratio:1;background:linear-gradient(145deg,#754954,#392432);border-radius:12px;font-size:clamp(2rem,6vw,3.8rem)}
+.profile-manager .profile-choice:nth-child(3n+2) span{background:linear-gradient(145deg,#bd8245,#814630)}
+.profile-manager .profile-choice:nth-child(3n) span{background:linear-gradient(145deg,#487985,#253b52)}
+.account-page .account-links{display:grid;grid-template-columns:1fr;gap:1px}
+.account-page .account-links a,.settings-manager{display:flex;align-items:center;justify-content:space-between;background:#281c22;padding:.95rem 1.15rem;border-radius:.45rem;text-align:left}
+.account-links a:after{content:'›';color:#baa9ae}
+.account-logout{margin:1.5rem auto;display:block}
+@media(min-width:900px){
+body>header,body:has(.discover-shelves)>header{display:flex;align-items:center;justify-content:flex-start;gap:1.25rem;padding:0 3.5vw;height:56px}
+body>header .brand,body:has(.discover-shelves)>header .brand{order:0;margin:0}
+body>header .brand svg{display:none}body>header .brand:after{display:none}
+.wordmark{display:inline;color:#fa3445;font:900 1.28rem/1 'Arial Narrow',Arial,sans-serif;letter-spacing:-.07em;white-space:nowrap}
+body>header .home-links,body:has(.discover-shelves)>header .home-links{order:1;display:flex;align-items:center;gap:1rem;flex:1}
+body>header .home-links a{padding:3px 0;background:none;color:white;border-radius:0;font:600 .85rem/1.4 Arial,sans-serif}
+body>header .home-links a[href="#search"]{order:8;margin-left:auto}body>header .home-links svg{width:20px;height:20px}
+body>header .tools{order:2;display:flex;align-items:center;gap:.8rem;margin:0}body>header .tools .user{height:30px;width:30px;font-size:1rem}body>header .tools .sc-bell{order:-1;background:none;border:none}
+body:has(.title-feature)>header{background:linear-gradient(#160c15a8,transparent)}
+body:has(.title-feature) .title-feature{padding:6rem 4vw 9rem;min-height:77vh}
+.title-feature+.body{margin-top:-7rem;background:transparent}.title-feature+.body .title-rails{margin-top:0}
+.title-feature+.body:has([data-preview] video){margin-top:0}
+.title-copy h1{max-width:19ch}.title-copy .actions{gap:.55rem}
+body #nav{display:none}
+}
+@media(max-width:899px){.account-page:has(.profile-manager){padding:2rem 1rem 7rem}.profile-manager .profile-choices{gap:.35rem}.auth-box .account-tabs button{font-size:.82rem}}
+.desktop-profile-menu[hidden]{display:none}.desktop-profile-menu{position:absolute;right:0;top:100%;min-width:12rem;display:grid;background:#1a1219f5;color:white;border:1px solid #ffffff25;border-radius:8px;padding:.45rem;box-shadow:0 10px 35px #0007;z-index:9}.desktop-profile-menu :is(a,button){display:block;text-align:left;background:transparent;border:0;color:white;font:inherit;padding:.65rem;cursor:pointer}.desktop-profile-menu :is(a,button):hover{background:#462b35}
+@media(min-width:900px){body>header .tools{position:relative}}
+@media(max-width:899px){.desktop-profile-menu{display:none}}
+
+:root[data-theme=burgundy]{--paper:#fafafa;--gold:#ff4352;--muted:#b5b5ba;background:#030303}
+[data-theme=burgundy] body{background:#030303}
+[data-theme=burgundy] body:has(.discover-shelves){background:radial-gradient(ellipse 90% 42rem at 52% 0%,color-mix(in srgb,var(--feature-color,#c21d30) 67%,black),transparent 100%),#030303}
+[data-theme=burgundy] :is(.panel,.report,.title-preview,dialog,.account-identity,.settings-manager,.account-links a,.access-panel,.subtitle-picker fieldset,.user,.desktop-profile-menu){background:linear-gradient(155deg,#242426,#101011 55%,#090909);border-color:#363638}
+[data-theme=burgundy] #nav{background:linear-gradient(#29292bee,#101010ef);border-color:#454547}
+body:has(.title-feature) .title-feature{display:flex;flex-direction:column;align-items:stretch;justify-content:end;gap:clamp(1.5rem,3vw,3rem);padding:clamp(6rem,13vh,10rem) var(--pad) 1rem;background:#050505}
+body:has(.title-feature) .title-feature:after{background:linear-gradient(0deg,#030303,rgba(0,0,0,.35) 15%,transparent 48%),linear-gradient(90deg,#0008,transparent 65%)}
+.title-feature .artwork-picks{width:100%;margin:0;position:relative}
+.artwork-picks .cinema-rail{margin:0}
+.artwork-picks .sectionHead h2{font:700 clamp(1.25rem,2.3vw,2rem)/1.15 Inter,Arial,sans-serif;text-shadow:0 1px 5px black}
+.title-feature+.body{margin-top:0;background:transparent}
+.artwork-picks .grid{scrollbar-width:none}.artwork-picks .grid::-webkit-scrollbar{display:none}
+.account-page .profile-manager .profile-choices{display:flex;flex-wrap:wrap;align-items:start}
+.profile-manager .add-profile span{background:#111;border:1px dashed #666;font-weight:300}
+.account-page .account-help{padding:1rem;background:#151516;border-radius:.45rem;text-align:left}.account-help summary{cursor:pointer}
+.account-page .account-logout{border:1px solid #dc3545;background:#111;color:white}
+.history-tabs{display:flex;gap:.5rem;height:auto;margin:1rem 0;flex-wrap:wrap}
+.history-tabs a{border:1px solid #38383b;border-radius:2rem;padding:.6rem .8rem;color:white}
+.history-tabs [aria-current]{border-color:#ff4352;background:#341318}
+
+body:has(.title-feature) .title-feature{
+  padding-top:clamp(16rem,44svh,38rem);
+  gap:clamp(1.5rem,3vw,2.75rem);
+}
+.title-feature .title-backdrop{object-position:center 25%}
+.title-feature .artwork-picks .cinema-rail>.grid{
+  grid-auto-columns:clamp(10rem,17vw,17rem);
+}
+@media(max-width:700px){
+  body:has(.title-feature) .title-feature{padding-top:clamp(13rem,34svh,22rem);gap:1.5rem}
+  .title-feature .artwork-picks .cinema-rail>.grid{grid-auto-columns:clamp(9rem,42vw,13rem)}
+}
